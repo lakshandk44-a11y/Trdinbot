@@ -23,7 +23,7 @@ def analyze(symbol):
 
 def run():
 
-    send("🔥 HIGH ACCURACY BOT STARTED")
+    send("🔥 ULTRA BOT STARTED")
 
     while True:
 
@@ -50,14 +50,12 @@ def run():
         price = df.iloc[-1]["c"]
 
         if best_score >= 5:
-            trade(best, "buy")
+            trade(best, "buy", STATE["trade_size"])
             add_trade()
-            send(f"📈 BUY {best} | {price} | SCORE {best_score}")
 
         elif best_score <= -4:
-            trade(best, "sell")
+            trade(best, "sell", STATE["trade_size"])
             add_trade()
-            send(f"📉 SELL {best} | {price} | SCORE {best_score}")
 
         time.sleep(40)
 
