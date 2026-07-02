@@ -1,26 +1,46 @@
-def smc(df):
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
+import discord
+from config import DISCORD_BOT_TOKEN
 
-    score = 0
+intents = discord.Intents.default()
+client = discord.Client(intents=intents)
 
-    # Break of structure
-    if last["c"] > prev["h"]:
-        score += 2
-    if last["c"] < prev["l"]:
-        score -= 2
+STATE = {
+    "run": False,
+    "trade_size": 0.01,
+    "leverage": 1
+}
 
-    # Strong candle filter (avoid weak noise)
-    body = abs(last["c"] - last["o"])
-    candle_range = last["h"] - last["l"]
+@client.event
+async def on_ready():
+    print("CONTROL BOT ONLINE")
 
-    if candle_range > 0 and body / candle_range > 0.6:
-        score += 1
+@client.event
+async def on_message(message):
 
-    return score
+    if message.author == client.user:
+        return
 
+    global STATE
 
-def trend(df):
-    if df.iloc[-1]["c"] > df.iloc[-20]["c"]:
-        return 1
-    return -1
+    if message.content.startswith("!start"):
+        try:
+            parts = message.content.split()
+
+            STATE["trade_size"] = float(parts[1])
+            STATE["leverage"] = int(parts[2])
+            STATE["run"] = True
+
+            await message.channel.send(
+                f"🚀 STARTED\n💰 SIZE: {STATE['trade_size']}\n⚡ LEV: {STATE['leverage']}"
+            )
+        except:
+            await message.channel.send("Format: !start 10 5")
+
+    if message.content == "!stop":
+        STATE["run"] = False
+        await message.channel.send("🛑 STOPPED")
+
+    if message.content == "!status":
+        await message.channel.send(str(STATE))
+
+client.run(DISCORD_BOT_TOKEN)
