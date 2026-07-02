@@ -1,17 +1,17 @@
 import time
-from config import MAX_TRADES_PER_HOUR
+from config import TIMEFRAMES
 
 trade_log = []
-hour_start = time.time()
+start_hour = time.time()
 
 def can_trade():
-    global trade_log, hour_start
+    global trade_log, start_hour
 
-    if time.time() - hour_start > 3600:
+    if time.time() - start_hour > 3600:
         trade_log = []
-        hour_start = time.time()
+        start_hour = time.time()
 
-    return len(trade_log) < MAX_TRADES_PER_HOUR
+    return len(trade_log) < 3
 
 
 def add_trade():
