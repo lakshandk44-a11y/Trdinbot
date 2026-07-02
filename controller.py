@@ -72,10 +72,10 @@ async def stop(ctx):
 # =========================
 @bot.event
 async def on_message(message):
-    global active_signal
-
     if message.author == bot.user:
         return
+
+    await bot.process_commands(message)
 
     content = message.content.upper()
 
