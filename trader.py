@@ -18,5 +18,5 @@ def get_data(symbol, tf):
     return pd.DataFrame(data, columns=["t","o","h","l","c","v"])
 
 
-def trade(symbol, side):
-    return exchange.create_market_order(symbol, side.lower(), TRADE_SIZE)
+def trade(symbol, side, size):
+    return exchange.create_market_order(symbol, side.lower(), size)
