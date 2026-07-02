@@ -26,11 +26,18 @@ async def trade_bot(amount, leverage):
 bot = commands.Bot(command_prefix="!", intents=discord.Intents.all(), case_insensitive=True)
 
 # පණිවිඩ සැකසීම සඳහා අවශ්‍ය කොටස එකතු කරන ලදී
+
+# මෙම කොටස ඔබේ main.py ගොනුවේ පවතින පරණ @bot.event කොටස ඉවත් කර ඒ වෙනුවට දමන්න
 @bot.event
 async def on_message(message):
+    # මෙය ලොග් එකට පණිවිඩය ලැබෙනවාදැයි බැලීමට උදව් වේ
+    print(f"පණිවිඩයක් ලැබුණා: {message.content} - යවන්නා: {message.author}")
+    
     if message.author == bot.user:
         return
+    
     await bot.process_commands(message)
+    
 
 @bot.command()
 async def start(ctx, amount: float, leverage: int):
