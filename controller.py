@@ -1,7 +1,11 @@
 import discord
 from config import DISCORD_BOT_TOKEN
 
+import discord
+
 intents = discord.Intents.default()
+intents.message_content = True
+
 client = discord.Client(intents=intents)
 
 STATE = {
