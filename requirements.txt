@@ -1,0 +1,6 @@
+ccxt
+pandas
+requests
+discord.py
+feedparser
+numpy
