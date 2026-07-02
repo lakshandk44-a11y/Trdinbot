@@ -75,9 +75,31 @@ async def on_message(message):
     if message.author == bot.user:
         return
 
-    await bot.process_commands(message)
+    content = message.content.lower()
 
-    content = message.content.upper()
+    if content.startswith("!start"):
+        await message.channel.send("🚀 Scanning started...")
+
+        results = scanner.scan_all()
+
+        if not results:
+            await message.channel.send("No signals found")
+            return
+
+        best = results[0]
+        decision = strategy.evaluate(best)
+
+        await message.channel.send(
+            f"🚨 SIGNAL\nCoin: {best['coin']}\nScore: {best['score']}\nDecision: {decision}\n\nReply YES or NO"
+        )
+
+    elif content == "yes":
+        await message.channel.send("✅ Paper trade executed")
+
+    elif content == "no":
+        await message.channel.send("❌ Ignored")
+
+    await bot.process_commands(message)
 
     # YES = open paper trade
     if content == "YES" and active_signal:
