@@ -22,7 +22,15 @@ async def trade_bot(amount, leverage):
 
     send_alert(f"✅ බොට් සාර්ථකව ආරම්භ විය. වත්මන් බැලන්ස්: {usdt_balance} USDT")
 
-bot = commands.Bot(command_prefix="!", intents=discord.Intents.all())
+# case_insensitive=True එකතු කරන ලදී
+bot = commands.Bot(command_prefix="!", intents=discord.Intents.all(), case_insensitive=True)
+
+# පණිවිඩ සැකසීම සඳහා අවශ්‍ය කොටස එකතු කරන ලදී
+@bot.event
+async def on_message(message):
+    if message.author == bot.user:
+        return
+    await bot.process_commands(message)
 
 @bot.command()
 async def start(ctx, amount: float, leverage: int):
