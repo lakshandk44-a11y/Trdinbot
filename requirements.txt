@@ -1,8 +1,0 @@
-ccxt
-pandas
-pandas-ta
-discord.py
-requests
-python-dotenv
-asyncio
-aiohttp
