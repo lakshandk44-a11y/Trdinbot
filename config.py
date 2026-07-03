@@ -1,34 +1,38 @@
 """
 HackerAI Auto Trading Bot - Configuration
-Railway.app compatible - Reads from environment variables
+ඔබගේ Binance API, Discord Webhook, News API settings
 """
 
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ============================================================
-# BINANCE API - Railway variables වලින් read කරන්න
+# BINANCE API CONFIGURATION
 # ============================================================
-BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY", "")
-BINANCE_API_SECRET = os.environ.get("BINANCE_API_SECRET", "")
-BINANCE_TESTNET = os.environ.get("BINANCE_TESTNET", "False").lower() == "true"
+BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "YOUR_BINANCE_API_KEY_HERE")
+BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "YOUR_BINANCE_API_SECRET_HERE")
+BINANCE_TESTNET = False  # True for testnet, False for real account
 
 # ============================================================
 # TRADING PARAMETERS
 # ============================================================
-BALANCE_PERCENTAGE = int(os.environ.get("BALANCE_PERCENTAGE", "5"))
-MAX_LEVERAGE = int(os.environ.get("MAX_LEVERAGE", "5"))
-RISK_PER_TRADE = float(os.environ.get("RISK_PER_TRADE", "0.02"))
+BALANCE_PERCENTAGE = 5  # බැලන්ස් එකෙන් 5%
+MAX_LEVERAGE = 5  # Maximum leverage (auto-adjusted based on coin)
+RISK_PER_TRADE = 0.02  # 2% risk per trade (for position sizing)
 
 # ============================================================
-# SIGNAL REQUIREMENTS
+# SIGNAL REQUIREMENTS (ඔබේ අලුත් conditions)
 # ============================================================
-MIN_TOOLS_MATCH = int(os.environ.get("MIN_TOOLS_MATCH", "3"))
-MIN_PROFIT_CHANCE = float(os.environ.get("MIN_PROFIT_CHANCE", "65.0"))
-SCAN_INTERVAL_SECONDS = int(os.environ.get("SCAN_INTERVAL_SECONDS", "30"))
-BALANCE_CHECK_INTERVAL = int(os.environ.get("BALANCE_CHECK_INTERVAL", "60"))
+MIN_TOOLS_MATCH = 3  # Tools 5න් අවම ගැලපෙන ගණන (5/3 rule)
+MIN_PROFIT_CHANCE = 65.0  # අවම profit chance එක 65%
+SCAN_INTERVAL_SECONDS = 30  # සෑම තත් 30කට වරක් scan (24/7)
+BALANCE_CHECK_INTERVAL = 60  # Balance check interval seconds
+WAIT_FOR_BALANCE = True  # Balance නැති වෙලාවට crash නොවී wait කරන්න
 
 # ============================================================
-# TOP 40 COINS
+# TOP 40 COINS (Binance USDT Perpetual Futures)
 # ============================================================
 TOP_40_COINS = [
     "BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT",
@@ -42,49 +46,49 @@ TOP_40_COINS = [
 ]
 
 # ============================================================
-# TIMEFRAMES
+# TIMEFRAMES (Best 3 Timeframes)
 # ============================================================
 TIMEFRAMES = {
-    "higher": "4h",
-    "medium": "1h",
-    "lower": "15m"
+    "higher": "4h",    # Higher timeframe (trend direction)
+    "medium": "1h",    # Medium timeframe (confirmation)
+    "lower": "15m"     # Lower timeframe (entry execution)
 }
 
 # ============================================================
-# ANALYSIS TOOLS
+# ANALYSIS TOOLS (5 Tools)
 # ============================================================
 ANALYSIS_TOOLS = {
-    "ict_smc": True,
-    "fvg": True,
-    "order_block": True,
-    "liquidity": True,
-    "market_structure": True
+    "ict_smc": True,           # Tool 1: ICT/Smart Money Concepts
+    "fvg": True,               # Tool 2: Fair Value Gap
+    "order_block": True,       # Tool 3: Order Blocks
+    "liquidity": True,         # Tool 4: Liquidity Sweeps
+    "market_structure": True   # Tool 5: Market Structure (BOS/CHoCH)
 }
 
 # ============================================================
-# NEWS API (optional)
+# NEWS API CONFIGURATION
 # ============================================================
-NEWS_API_KEY = os.environ.get("NEWS_API_KEY", "")
-NEWS_ENABLED = os.environ.get("NEWS_ENABLED", "True").lower() == "true"
+NEWS_API_KEY = os.getenv("NEWS_API_KEY", "YOUR_NEWS_API_KEY_HERE")
+NEWS_ENABLED = True
 
 # ============================================================
-# DISCORD (optional)
+# DISCORD / TELEGRAM NOTIFICATIONS
 # ============================================================
-DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
-DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
-ENABLE_DISCORD = os.environ.get("ENABLE_DISCORD", "False").lower() == "true"
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "YOUR_DISCORD_WEBHOOK_URL_HERE")
+DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "YOUR_DISCORD_BOT_TOKEN_HERE")
+ENABLE_DISCORD = True
 
 # ============================================================
 # TRADE MANAGEMENT
 # ============================================================
-TAKE_PROFIT_PERCENT = float(os.environ.get("TAKE_PROFIT_PERCENT", "2.0"))
-STOP_LOSS_PERCENT = float(os.environ.get("STOP_LOSS_PERCENT", "1.0"))
-TRAILING_STOP_ACTIVATE = float(os.environ.get("TRAILING_STOP_ACTIVATE", "0.5"))
-TRAILING_STOP_DISTANCE = float(os.environ.get("TRAILING_STOP_DISTANCE", "0.3"))
-MAX_OPEN_TRADES = int(os.environ.get("MAX_OPEN_TRADES", "15"))
+TAKE_PROFIT_PERCENT = 2.0      # 2% take profit
+STOP_LOSS_PERCENT = 1.0        # 1% stop loss
+TRAILING_STOP_ACTIVATE = 0.5   # Activate trailing at 0.5% profit
+TRAILING_STOP_DISTANCE = 0.3   # Trailing stop distance 0.3%
+MAX_OPEN_TRADES = 15           # Maximum concurrent trades
 
 # ============================================================
 # LOGGING
 # ============================================================
-LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
-LOG_FILE = os.environ.get("LOG_FILE", "hackerai_bot.log")
+LOG_LEVEL = "INFO"
+LOG_FILE = "hackerai_bot.log"
