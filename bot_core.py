@@ -295,75 +295,123 @@ class HackerAIBot:
             
         return result
     
-    def _execute_trade(self, symbol: str, decision: str, signal: Dict, ohlc_data: Dict):
+def _execute_trade(self, symbol, decision, signal, ohlc_data):
         """
-        Execute trade on Binance Futures
-        Uses 5% of balance with auto leverage
+        🔥 Auto-Decision: Checks coin's min trade, leverage, and balance.
+        If it can trade with exactly 5% balance at available leverage → TRADES.
+        Otherwise → SKIPS cleanly. Never crashes.
         """
         direction = signal.get("direction", 0)
         if direction == 0:
             return
-        
-        # Balance crash protection: calculate available balance
-        allocated_balance = self.balance * (self.config.get("BALANCE_PERCENTAGE", 5) / 100)
-        trade_balance = allocated_balance
-        
-        # If allocated balance is too small, use whatever is available
-        if trade_balance < 10:  # Minimum $10 for futures
-            trade_balance = max(10, self.balance * 0.01)  # Use 1% if 5% is too small
-            logger.warning(f"⚠️ Low balance: using {trade_balance:.2f} USDT for {symbol}")
-        
-        if trade_balance < 10:
-            logger.warning(f"⚠️ Insufficient balance for {symbol}: {trade_balance:.2f} USDT")
-            return
-        
-        # Get current price
+
+        # ─── 1. Get coin-specific exchange info (minNotional, maxLeverage) ───
+        coin_min_notional = 10.0   # Fallback
+        coin_max_leverage = 20     # Fallback
+        try:
+            info = self.client.futures_exchange_info()
+            for sym in info.get("symbols", []):
+                if sym["symbol"] == symbol:
+                    for f in sym.get("filters", []):
+                        if f["filterType"] == "MIN_NOTIONAL":
+                            coin_min_notional = float(f.get("minNotional", f.get("notional", 10.0)))
+                        if f["filterType"] == "LOT_SIZE":
+                            coin_max_leverage = int(sym.get("leverageBrackets", [{}])[0].get("initialLeverage", 20))
+                            if not sym.get("leverageBrackets"):
+                                # Direct from symbol filters
+                                pass
+                    # Read leverage brackets
+                    brackets = sym.get("leverageBrackets", [])
+                    if brackets:
+                        coin_max_leverage = int(brackets[0].get("initialLeverage", 20))
+                    break
+        except Exception as e:
+            logger.debug(f"Could not fetch exchange info for {symbol}: {e}")
+
+        # ─── 2. Calculate exact margin (5% of balance) ───
+        balance_pct = self.config.get("BALANCE_PERCENTAGE", 5) / 100.0
+        margin = self.balance * balance_pct
+
+        # ─── 3. Get config max leverage ───
+        config_max_lev = self.config.get("MAX_LEVERAGE", 5)
+        # Actual max leverage the bot will consider
+        effective_max_lev = min(coin_max_leverage, config_max_lev)
+
+        # ─── 4. Calculate position value at max possible leverage ───
+        max_position = margin * effective_max_lev
+
+        # ─── 5. AUTO DECISION ───
+        logger.info(f"🔍 {symbol}: margin=${margin:.4f}, "
+                    f"minNotional=${coin_min_notional:.2f}, "
+                    f"maxLev={coin_max_leverage}x, "
+                    f"configLev={config_max_lev}x, "
+                    f"effectiveLev={effective_max_lev}x, "
+                    f"maxPos=${max_position:.2f}")
+
+        if max_position < coin_min_notional:
+            logger.info(f"⏭️ {symbol}: Even {effective_max_lev}x gives ${max_position:.2f} < ${coin_min_notional:.2f} min. "
+                        f"Skipping. Need ~${coin_min_notional / (effective_max_lev or 1):.2f} margin (5% of ${(coin_min_notional / (effective_max_lev or 1)) / balance_pct:.2f} balance).")
+            return  # ✅ Clean skip, NOT a crash
+
+        # ─── 6. Calculate the EXACT leverage needed ───
+        # We want: margin * leverage = coin_min_notional (or slightly above)
+        optimal_leverage = coin_min_notional / margin
+        optimal_leverage = int(optimal_leverage) + (1 if optimal_leverage % 1 > 0 else 0)
+        # Cap at effective max
+        trade_leverage = min(optimal_leverage, effective_max_lev)
+
+        # Also consider volatility safety
+        volatility = self._calculate_volatility(ohlc_data)
+        vol_leverage = self.trade_manager.calculate_dynamic_leverage(symbol, volatility)
+        # Final leverage: lowest of all
+        final_leverage = min(trade_leverage, vol_leverage)
+        final_leverage = max(1, final_leverage)  # At least 1x
+
+        # Recalculate final position
+        final_position = margin * final_leverage
+
+        logger.info(f"✅ {symbol}: TRADE POSSIBLE! "
+                    f"Margin=${margin:.2f}, Leverage={final_leverage}x, "
+                    f"Position=${final_position:.2f} (min=${coin_min_notional:.2f})")
+
+        # ─── 7. Get current price ───
         lower_tf = ohlc_data.get("lower") or ohlc_data.get("medium") or ohlc_data.get("higher")
         if lower_tf is None or len(lower_tf) == 0:
             return
         current_price = float(lower_tf["close"].iloc[-1])
-        
-        # Calculate volatility and leverage
-        volatility = self._calculate_volatility(ohlc_data)
-        leverage = self.trade_manager.calculate_dynamic_leverage(symbol, volatility)
-        
-        # Set leverage on Binance
+
+        # ─── 8. Set leverage on Binance ───
         try:
-            self.client.futures_change_leverage(symbol=symbol, leverage=leverage)
+            self.client.futures_change_leverage(symbol=symbol, leverage=final_leverage)
+            logger.info(f"⚙️ Leverage set: {symbol} = {final_leverage}x")
         except Exception as e:
             logger.warning(f"Leverage change warning for {symbol}: {e}")
-        
-        # Calculate position size
-        tp_percent = self.config.get("TAKE_PROFIT_PERCENT", 2.0) / 100
-        sl_percent = self.config.get("STOP_LOSS_PERCENT", 1.0) / 100
-        
-        if decision == "BUY":
-            sl_price = current_price * (1 - sl_percent)
-        else:
-            sl_price = current_price * (1 + sl_percent)
-        
+
+        # ─── 9. Calculate position size ───
+        sl_percent = self.config.get("STOP_LOSS_PERCENT", 1.0) / 100.0
+        sl_price = current_price * (1 - sl_percent) if decision == "BUY" else current_price * (1 + sl_percent)
+
         quantity = self.trade_manager.calculate_position_size(
-            trade_balance, current_price, sl_price, leverage
+            margin * final_leverage,
+            current_price,
+            sl_price,
+            final_leverage
         )
-        
         quantity = self._round_quantity(symbol, quantity)
-        
+
         if quantity <= 0:
             logger.warning(f"⚠️ Invalid quantity for {symbol}: {quantity}")
             return
-        
-        # Check rate limiting (min 5 seconds between trades on same symbol)
+
+        # ─── 10. Rate limit ───
         now = time.time()
-        if symbol in self.last_trade_time:
-            if now - self.last_trade_time[symbol] < 5:
-                logger.debug(f"⏳ Rate limit: skipping {symbol}")
-                return
+        if symbol in self.last_trade_time and now - self.last_trade_time[symbol] < 5:
+            return
         self.last_trade_time[symbol] = now
-        
-        # PLACE ORDER
+
+        # ─── 11. PLACE ORDER ───
         try:
             side = "BUY" if decision == "BUY" else "SELL"
-            
             order = self.client.futures_create_order(
                 symbol=symbol,
                 side=side,
@@ -371,46 +419,31 @@ class HackerAIBot:
                 quantity=quantity,
                 reduceOnly=False
             )
-            
-            logger.info(f"✅ TRADE EXECUTED: {side} {symbol} | "
-                       f"Price: {current_price:.8f} | Qty: {quantity} | "
-                       f"Lev: {leverage}x | Balance Used: ${trade_balance:.2f}")
-            
-            # Register in trade manager
+            logger.info(f"✅ TRADE: {side} {symbol} @ {current_price:.8f} | "
+                        f"Qty={quantity} | Lev={final_leverage}x | "
+                        f"Pos=${final_position:.2f} | Margin=${margin:.2f}")
+
             trade = self.trade_manager.open_new_trade(
                 symbol=symbol,
                 side=side,
                 entry_price=current_price,
                 quantity=quantity,
-                leverage=leverage,
+                leverage=final_leverage,
                 analysis_result={
                     "signal": signal,
                     "volatility": volatility,
                     "tools_agreeing": signal.get("tools_agreeing", 0),
                     "profit_chance": signal.get("profit_chance", 0),
-                    "timestamp": datetime.now().isoformat()
+                    "margin_used": margin,
+                    "position_value": final_position,
+                    "min_notional": coin_min_notional,
                 }
             )
-            
             if trade:
                 trade["binance_order_id"] = order.get("orderId")
-            
-            # Log trade
-            self._log_trade({
-                "type": "OPEN",
-                "symbol": symbol,
-                "side": side,
-                "price": current_price,
-                "quantity": quantity,
-                "leverage": leverage,
-                "tools_agreeing": signal.get("tools_agreeing", 0),
-                "profit_chance": signal.get("profit_chance", 0)
-            })
-            
+
         except BinanceAPIException as e:
             logger.error(f"❌ Order failed for {symbol}: {e.message}")
-            if "insufficient balance" in str(e).lower():
-                logger.warning("⚠️ Insufficient balance - will retry when funds available")
         except Exception as e:
             logger.error(f"❌ Order error for {symbol}: {e}")
     
