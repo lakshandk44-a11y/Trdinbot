@@ -295,7 +295,7 @@ class HackerAIBot:
             
         return result
     
-def _execute_trade(self, symbol, decision, signal, ohlc_data):
+    def _execute_trade(self, symbol, decision, signal, ohlc_data):
         """
         🔥 Auto-Decision: Checks coin's min trade, leverage, and balance.
         If it can trade with exactly 5% balance at available leverage → TRADES.
@@ -447,7 +447,7 @@ def _execute_trade(self, symbol, decision, signal, ohlc_data):
         except Exception as e:
             logger.error(f"❌ Order error for {symbol}: {e}")
     
-   def _calculate_volatility(self, ohlc_data: Dict) -> float:
+    def _calculate_volatility(self, ohlc_data: Dict) -> float:
         """Calculate volatility from higher timeframe"""
         try:
             higher_tf = ohlc_data.get("higher")
