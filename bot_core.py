@@ -447,7 +447,7 @@ def _execute_trade(self, symbol, decision, signal, ohlc_data):
         except Exception as e:
             logger.error(f"❌ Order error for {symbol}: {e}")
     
-    def _calculate_volatility(self, ohlc_data: Dict) -> float:
+   def _calculate_volatility(self, ohlc_data: Dict) -> float:
         """Calculate volatility from higher timeframe"""
         try:
             higher_tf = ohlc_data.get("higher")
