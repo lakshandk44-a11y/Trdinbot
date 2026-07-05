@@ -11,8 +11,8 @@ from typing import Dict, List, Optional
 import pandas as pd
 import numpy as np
 
-from binance.client import Client
-from binance.exceptions import BinanceAPIException
+from binance.um_futures import UMFutures
+from binance.error import ClientError
 from decimal import Decimal, ROUND_DOWN
 
 from config import *
@@ -31,19 +31,18 @@ class HackerAIBot:
         self.paused = False
         self.waiting_for_balance = False
 
-        # ====== FIXED: Force Futures base URL ======
+        # ====== FIXED: Use official Binance Futures SDK ======
         if config.get("BINANCE_TESTNET", False):
-            futures_base_url = "https://testnet.binancefuture.com"
+            base_url = "https://testnet.binancefuture.com"
         else:
-            futures_base_url = "https://fapi.binance.com"
+            base_url = "https://fapi.binance.com"
 
-        self.client = Client(
-            config["BINANCE_API_KEY"],
-            config["BINANCE_API_SECRET"],
-            testnet=False
+        self.client = UMFutures(
+            key=config["BINANCE_API_KEY"],
+            secret=config["BINANCE_API_SECRET"],
+            base_url=base_url
         )
-        self.client.FUTURES_URL = futures_base_url
-        # ============================================
+        # =====================================================
 
         # Initialize engines
         self.analysis_engine = AnalysisEngine(config)
@@ -127,7 +126,7 @@ class HackerAIBot:
     def _update_account_info_with_retry(self) -> bool:
         """Update account info with balance crash protection"""
         try:
-            account = self.client.futures_account()
+            account = self.client.account()
             self.account_info = account
 
             for asset in account.get("assets", []):
@@ -149,7 +148,7 @@ class HackerAIBot:
 
             return True
 
-        except BinanceAPIException as e:
+        except ClientError as e:
             self.consecutive_balance_errors += 1
             if self.consecutive_balance_errors >= 3:
                 if not self.waiting_for_balance:
@@ -165,7 +164,7 @@ class HackerAIBot:
         """Get top 40 coins from Binance by volume"""
         coins = self.config.get("TOP_40_COINS", TOP_40_COINS)
         try:
-            tickers = self.client.futures_ticker()
+            tickers = self.client.ticker_24hr()
             usdt_pairs = [t for t in tickers if t["symbol"].endswith("USDT")]
             sorted_by_volume = sorted(usdt_pairs, key=lambda x: float(x["quoteVolume"]), reverse=True)
             top_40 = [t["symbol"] for t in sorted_by_volume[:40]]
@@ -233,13 +232,10 @@ class HackerAIBot:
                 limit = {"4h": 100, "1h": 150, "15m": 200}.get(tf_interval, 100)
 
                 try:
-                    klines = self.client.futures_klines(symbol=symbol, interval=tf_interval, limit=limit)
-                except BinanceAPIException:
-                    try:
-                        klines = self.client.get_klines(symbol=symbol, interval=tf_interval, limit=limit)
-                    except Exception:
-                        result[tf_name] = None
-                        continue
+                    klines = self.client.klines(symbol=symbol, interval=tf_interval, limit=limit)
+                except ClientError:
+                    result[tf_name] = None
+                    continue
 
                 if klines:
                     df = pd.DataFrame(klines, columns=[
@@ -274,7 +270,7 @@ class HackerAIBot:
         coin_max_leverage = 20
 
         try:
-            info = self.client.futures_exchange_info()
+            info = self.client.exchange_info()
             for s in info.get("symbols", []):
                 if s["symbol"] == symbol:
                     for f in s.get("filters", []):
@@ -337,7 +333,7 @@ class HackerAIBot:
 
         # Set leverage on Binance
         try:
-            self.client.futures_change_leverage(symbol=symbol, leverage=final_leverage)
+            self.client.change_leverage(symbol=symbol, leverage=final_leverage)
             logger.info(f"⚙️ Leverage set: {symbol} = {final_leverage}x")
         except Exception as e:
             logger.warning(f"Leverage change warning for {symbol}: {e}")
@@ -370,12 +366,11 @@ class HackerAIBot:
         # Place order
         try:
             side = "BUY" if decision == "BUY" else "SELL"
-            order = self.client.futures_create_order(
+            order = self.client.new_order(
                 symbol=symbol,
                 side=side,
                 type="MARKET",
-                quantity=quantity,
-                reduceOnly=False
+                quantity=quantity
             )
 
             logger.info(f"✅ TRADE: {side} {symbol} @ {current_price:.8f} | "
@@ -401,8 +396,8 @@ class HackerAIBot:
             if trade:
                 trade["binance_order_id"] = order.get("orderId")
 
-        except BinanceAPIException as e:
-            logger.error(f"❌ Order failed for {symbol}: {e.message}")
+        except ClientError as e:
+            logger.error(f"❌ Order failed for {symbol}: {e}")
         except Exception as e:
             logger.error(f"❌ Order error for {symbol}: {e}")
 
@@ -421,7 +416,7 @@ class HackerAIBot:
     def _round_quantity(self, symbol: str, quantity: float) -> float:
         """Round quantity to exchange step size"""
         try:
-            info = self.client.futures_exchange_info()
+            info = self.client.exchange_info()
             for s in info.get("symbols", []):
                 if s["symbol"] == symbol:
                     for f in s.get("filters", []):
@@ -440,7 +435,7 @@ class HackerAIBot:
         open_trades = self.trade_manager.get_open_trades()
         for symbol in open_trades:
             try:
-                ticker = self.client.futures_symbol_ticker(symbol=symbol)
+                ticker = self.client.ticker_price(symbol=symbol)
                 self.trade_manager.update_trade_price(symbol, float(ticker["price"]))
             except Exception as e:
                 logger.debug(f"Price update error for {symbol}: {e}")
