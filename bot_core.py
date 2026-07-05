@@ -6,13 +6,14 @@ Auto Leverage | Auto Min Notional Check
 
 import logging
 import time
+import hashlib
+import hmac
+import requests
+import json
 from datetime import datetime
 from typing import Dict, List, Optional
 import pandas as pd
 import numpy as np
-
-from binance.um_futures import UMFutures
-from binance.error import ClientError
 from decimal import Decimal, ROUND_DOWN
 
 from config import *
@@ -20,6 +21,124 @@ from analysis_engine import AnalysisEngine
 from trade_manager import TradeManager
 
 logger = logging.getLogger(__name__)
+
+
+class BinanceFuturesClient:
+    """Custom Binance Futures client using raw requests (avoid library signing issues)"""
+
+    def __init__(self, api_key: str, api_secret: str, testnet: bool = False):
+        self.api_key = api_key
+        self.api_secret = api_secret
+        if testnet:
+            self.base_url = "https://testnet.binancefuture.com"
+        else:
+            self.base_url = "https://fapi.binance.com"
+        self.session = requests.Session()
+        self.session.headers.update({"X-MBX-APIKEY": api_key})
+
+    def _sign(self, params: dict) -> dict:
+        """Sign request parameters"""
+        query_string = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
+        signature = hmac.new(
+            self.api_secret.encode("utf-8"),
+            query_string.encode("utf-8"),
+            hashlib.sha256
+        ).hexdigest()
+        params["signature"] = signature
+        return params
+
+    def _get(self, path: str, params: dict = None) -> dict:
+        """Signed GET request"""
+        if params is None:
+            params = {}
+        params["timestamp"] = int(time.time() * 1000)
+        params["recvWindow"] = 5000
+        params = self._sign(params)
+        url = f"{self.base_url}{path}"
+        resp = self.session.get(url, params=params)
+        if resp.status_code != 200:
+            raise Exception(f"API Error {resp.status_code}: {resp.text}")
+        return resp.json()
+
+    def _post(self, path: str, params: dict = None) -> dict:
+        """Signed POST request"""
+        if params is None:
+            params = {}
+        params["timestamp"] = int(time.time() * 1000)
+        params["recvWindow"] = 5000
+        params = self._sign(params)
+        url = f"{self.base_url}{path}"
+        resp = self.session.post(url, params=params)
+        if resp.status_code != 200:
+            raise Exception(f"API Error {resp.status_code}: {resp.text}")
+        return resp.json()
+
+    # ---- Futures API Methods ----
+
+    def ping(self) -> dict:
+        resp = self.session.get(f"{self.base_url}/fapi/v1/ping")
+        return resp.json()
+
+    def time(self) -> dict:
+        resp = self.session.get(f"{self.base_url}/fapi/v1/time")
+        return resp.json()
+
+    def account(self) -> dict:
+        return self._get("/fapi/v2/account")
+
+    def exchange_info(self) -> dict:
+        resp = self.session.get(f"{self.base_url}/fapi/v1/exchangeInfo")
+        return resp.json()
+
+    def klines(self, symbol: str, interval: str, limit: int = 100) -> list:
+        params = {"symbol": symbol, "interval": interval, "limit": limit}
+        resp = self.session.get(f"{self.base_url}/fapi/v1/klines", params=params)
+        return resp.json()
+
+    def ticker_24hr(self) -> list:
+        resp = self.session.get(f"{self.base_url}/fapi/v1/ticker/24hr")
+        return resp.json()
+
+    def ticker_price(self, symbol: str = None) -> dict:
+        params = {}
+        if symbol:
+            params["symbol"] = symbol
+        resp = self.session.get(f"{self.base_url}/fapi/v1/ticker/price", params=params)
+        data = resp.json()
+        if symbol:
+            return data
+        return data
+
+    def change_leverage(self, symbol: str, leverage: int) -> dict:
+        return self._post("/fapi/v1/leverage", {
+            "symbol": symbol,
+            "leverage": leverage
+        })
+
+    def new_order(self, symbol: str, side: str, type: str, quantity: float,
+                  reduceOnly: bool = False) -> dict:
+        params = {
+            "symbol": symbol,
+            "side": side,
+            "type": type,
+            "quantity": quantity,
+            "reduceOnly": "true" if reduceOnly else "false"
+        }
+        return self._post("/fapi/v1/order", params)
+
+    def get_order(self, symbol: str, orderId: int = None, origClientOrderId: str = None) -> dict:
+        params = {"symbol": symbol}
+        if orderId:
+            params["orderId"] = orderId
+        if origClientOrderId:
+            params["origClientOrderId"] = origClientOrderId
+        return self._get("/fapi/v1/order", params)
+
+    def cancel_order(self, symbol: str, orderId: int = None) -> dict:
+        params = {"symbol": symbol}
+        if orderId:
+            params["orderId"] = orderId
+        return self._post("/fapi/v1/order", params)
 
 
 class HackerAIBot:
@@ -31,18 +150,21 @@ class HackerAIBot:
         self.paused = False
         self.waiting_for_balance = False
 
-        # ====== FIXED: Use official Binance Futures SDK ======
-        if config.get("BINANCE_TESTNET", False):
-            base_url = "https://testnet.binancefuture.com"
-        else:
-            base_url = "https://fapi.binance.com"
-
-        self.client = UMFutures(
-            key=config["BINANCE_API_KEY"],
-            secret=config["BINANCE_API_SECRET"],
-            base_url=base_url
+        # ====== FIXED: Custom Binance Futures Client ======
+        self.client = BinanceFuturesClient(
+            api_key=config["BINANCE_API_KEY"],
+            api_secret=config["BINANCE_API_SECRET"],
+            testnet=config.get("BINANCE_TESTNET", False)
         )
-        # =====================================================
+
+        # Test connection
+        try:
+            ping = self.client.ping()
+            logger.info(f"✅ Binance Futures API connected (ping: {ping})")
+            srv_time = self.client.time()
+            logger.info(f"🕐 Server time: {srv_time.get('serverTime', 'N/A')}")
+        except Exception as e:
+            logger.error(f"❌ Binance Futures connection failed: {e}")
 
         # Initialize engines
         self.analysis_engine = AnalysisEngine(config)
@@ -148,16 +270,13 @@ class HackerAIBot:
 
             return True
 
-        except ClientError as e:
+        except Exception as e:
             self.consecutive_balance_errors += 1
             if self.consecutive_balance_errors >= 3:
                 if not self.waiting_for_balance:
                     logger.warning(f"⚠️ Balance fetch failed {self.consecutive_balance_errors}x. Waiting...")
                 self.waiting_for_balance = True
             logger.error(f"Binance API error (account): {e}")
-            return False
-        except Exception as e:
-            logger.error(f"Account update error: {e}")
             return False
 
     def _get_top_coins(self) -> List[str]:
@@ -233,7 +352,7 @@ class HackerAIBot:
 
                 try:
                     klines = self.client.klines(symbol=symbol, interval=tf_interval, limit=limit)
-                except ClientError:
+                except Exception:
                     result[tf_name] = None
                     continue
 
@@ -396,8 +515,6 @@ class HackerAIBot:
             if trade:
                 trade["binance_order_id"] = order.get("orderId")
 
-        except ClientError as e:
-            logger.error(f"❌ Order failed for {symbol}: {e}")
         except Exception as e:
             logger.error(f"❌ Order error for {symbol}: {e}")
 
