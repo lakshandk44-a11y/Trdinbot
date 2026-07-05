@@ -31,12 +31,19 @@ class HackerAIBot:
         self.paused = False
         self.waiting_for_balance = False
 
-        # Initialize Binance client
+        # ====== FIXED: Force Futures base URL ======
+        if config.get("BINANCE_TESTNET", False):
+            futures_base_url = "https://testnet.binancefuture.com"
+        else:
+            futures_base_url = "https://fapi.binance.com"
+
         self.client = Client(
             config["BINANCE_API_KEY"],
             config["BINANCE_API_SECRET"],
-            testnet=config.get("BINANCE_TESTNET", False)
+            testnet=False
         )
+        self.client.FUTURES_URL = futures_base_url
+        # ============================================
 
         # Initialize engines
         self.analysis_engine = AnalysisEngine(config)
