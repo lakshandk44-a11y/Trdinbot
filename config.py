@@ -1,6 +1,6 @@
 """
 HackerAI Auto Trading Bot - Configuration
-ඔබගේ Binance API, Discord Webhook, News API settings
+à¶”à¶¶à¶œà·š Binance API, Discord Webhook, News API settings
 """
 
 import os
@@ -11,25 +11,25 @@ load_dotenv()
 # ============================================================
 # BINANCE API CONFIGURATION
 # ============================================================
-BINANCE_API_KEY ="f4yAOlamO7amr0UieJU9oAzd7hZunCOitWDovd2OA3G1HP5bpXNvGCFvL8osMmAp"
-BINANCE_API_SECRET ="31gwaasC2tTJOcGHqRGHIxJuoLMr7Mn4jam7Rj2IIjfFaoUENmg4EHHRrOEonCum"
+BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "YOUR_BINANCE_API_KEY_HERE")
+BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "YOUR_BINANCE_API_SECRET_HERE")
 BINANCE_TESTNET = False  # True for testnet, False for real account
 
 # ============================================================
 # TRADING PARAMETERS
 # ============================================================
-BALANCE_PERCENTAGE = 5  # බැලන්ස් එකෙන් 5%
+BALANCE_PERCENTAGE = 5  # à¶¶à·à¶½à¶±à·Šà·ƒà·Š à¶‘à¶šà·™à¶±à·Š 5%
 MAX_LEVERAGE = 5  # Maximum leverage (auto-adjusted based on coin)
 RISK_PER_TRADE = 0.02  # 2% risk per trade (for position sizing)
 
 # ============================================================
-# SIGNAL REQUIREMENTS (ඔබේ අලුත් conditions)
+# SIGNAL REQUIREMENTS (à¶”à¶¶à·š à¶…à¶½à·”à¶­à·Š conditions)
 # ============================================================
-MIN_TOOLS_MATCH = 3  # Tools 5න් අවම ගැලපෙන ගණන (5/3 rule)
-MIN_PROFIT_CHANCE = 65.0  # අවම profit chance එක 65%
-SCAN_INTERVAL_SECONDS = 30  # සෑම තත් 30කට වරක් scan (24/7)
+MIN_TOOLS_MATCH = 3  # Tools 5à¶±à·Š à¶…à·€à¶¸ à¶œà·à¶½à¶´à·™à¶± à¶œà¶«à¶± (5/3 rule)
+MIN_PROFIT_CHANCE = 65.0  # à¶…à·€à¶¸ profit chance à¶‘à¶š 65%
+SCAN_INTERVAL_SECONDS = 30  # à·ƒà·‘à¶¸ à¶­à¶­à·Š 30à¶šà¶§ à·€à¶»à¶šà·Š scan (24/7)
 BALANCE_CHECK_INTERVAL = 60  # Balance check interval seconds
-WAIT_FOR_BALANCE = True  # Balance නැති වෙලාවට crash නොවී wait කරන්න
+WAIT_FOR_BALANCE = True  # Balance à¶±à·à¶­à·’ à·€à·™à¶½à·à·€à¶§ crash à¶±à·œà·€à·“ wait à¶šà¶»à¶±à·Šà¶±
 
 # ============================================================
 # TOP 40 COINS (Binance USDT Perpetual Futures)
