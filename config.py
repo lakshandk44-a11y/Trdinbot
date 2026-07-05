@@ -11,8 +11,8 @@ load_dotenv()
 # ============================================================
 # BINANCE API CONFIGURATION
 # ============================================================
-BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "YOUR_BINANCE_API_KEY_HERE")
-BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "YOUR_BINANCE_API_SECRET_HERE")
+BINANCE_API_KEY ="f4yAOlamO7amr0UieJU9oAzd7hZunCOitWDovd2OA3G1HP5bpXNvGCFvL8osMmAp"
+BINANCE_API_SECRET ="31gwaasC2tTJOcGHqRGHIxJuoLMr7Mn4jam7Rj2IIjfFaoUENmg4EHHRrOEonCum"
 BINANCE_TESTNET = False  # True for testnet, False for real account
 
 # ============================================================
