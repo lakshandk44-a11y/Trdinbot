@@ -80,43 +80,97 @@ class AnalysisEngine:
         return results
     
     def _ict_smc_analysis(self, ohlc: pd.DataFrame) -> Dict:
-        """Tool 1: ICT / Smart Money Concepts Analysis"""
-        result = {"bullish": False, "bearish": False, "strength": 0}
-        
+        """
+        Tool 1: ICT / Smart Money Concepts Analysis
+
+        FIX: the old version only checked "big candle body + makes a new
+        high/low" and called that "ICT". That is not ICT — it's just a
+        momentum-candle filter. This version implements the actual concepts
+        the bot's docstring claims to use:
+          - Displacement: an expansion candle/range that is significantly
+            larger than the recent average range (real momentum, not just a
+            big body).
+          - Premium / Discount (PD) array: where price currently sits inside
+            its recent trading range (top half = premium / sell zone,
+            bottom half = discount / buy zone).
+          - Optimal Trade Entry (OTE): the classic 61.8%-79% retracement
+            zone of the most recent swing, where ICT-style entries are
+            favored.
+          - Volume-confirmed displacement, used as an approximation for
+            inducement (a liquidity grab followed by a strong reversal move).
+        """
+        result = {
+            "bullish": False, "bearish": False, "strength": 0,
+            "displacement": False, "pd_zone": None, "ote": False
+        }
+
         if len(ohlc) < 50:
             return result
-            
+
         close = ohlc["close"].values
         high = ohlc["high"].values
         low = ohlc["low"].values
         open_p = ohlc["open"].values
-        
-        for i in range(20, min(50, len(ohlc))):
-            body = abs(close[-i] - open_p[-i])
-            range_total = high[-i] - low[-i]
-            if range_total > 0:
-                body_ratio = body / range_total
-                if close[-i] > open_p[-i] and body_ratio > 0.7:
-                    if i > 5 and high[-i] > max(high[-i-5:-i]):
-                        result["bullish"] = True
-                        result["strength"] += 1
-                elif close[-i] < open_p[-i] and body_ratio > 0.7:
-                    if i > 5 and low[-i] < min(low[-i-5:-i]):
-                        result["bearish"] = True
-                        result["strength"] -= 1
-        
         volume = ohlc["volume"].values if "volume" in ohlc.columns else None
-        if volume is not None:
-            avg_vol = np.mean(volume[-30:])
-            if avg_vol > 0 and volume[-1] > avg_vol * 1.5:
-                body_l = abs(close[-1] - open_p[-1])
-                if close[-1] > open_p[-1] and body_l > (high[-1] - low[-1]) * 0.6:
+
+        # ---- Displacement: current range meaningfully bigger than recent average ----
+        recent_ranges = high[-31:-1] - low[-31:-1]
+        avg_range = np.mean(recent_ranges) if len(recent_ranges) > 0 else 0.0
+        last_range = high[-1] - low[-1]
+        last_body = abs(close[-1] - open_p[-1])
+        displacement = bool(
+            avg_range > 0 and last_range > avg_range * 1.5 and last_body > last_range * 0.6
+        )
+        result["displacement"] = displacement
+
+        # ---- Premium / Discount array: where is price within its recent swing range ----
+        swing_high = np.max(high[-40:])
+        swing_low = np.min(low[-40:])
+        range_size = swing_high - swing_low
+
+        pd_zone = None
+        ote = False
+        if range_size > 0:
+            position_in_range = (close[-1] - swing_low) / range_size
+            pd_zone = "discount" if position_in_range <= 0.5 else "premium"
+
+            # Optimal Trade Entry: retracement sitting in the classic 61.8%-79% zone,
+            # measured from whichever side of the range price retraced from.
+            retracement_from_high = (swing_high - close[-1]) / range_size
+            retracement_from_low = (close[-1] - swing_low) / range_size
+            if 0.618 <= retracement_from_high <= 0.79 or 0.618 <= retracement_from_low <= 0.79:
+                ote = True
+
+        result["pd_zone"] = pd_zone
+        result["ote"] = ote
+
+        # ---- Directional bias: displacement aligned with PD array location ----
+        if displacement and close[-1] > open_p[-1] and pd_zone == "discount":
+            result["bullish"] = True
+            result["strength"] += 2
+        elif displacement and close[-1] < open_p[-1] and pd_zone == "premium":
+            result["bearish"] = True
+            result["strength"] -= 2
+
+        # OTE confluence: buying/selling from the classic retracement zone adds strength
+        if ote and pd_zone == "discount" and close[-1] > open_p[-1]:
+            result["bullish"] = True
+            result["strength"] += 1
+        elif ote and pd_zone == "premium" and close[-1] < open_p[-1]:
+            result["bearish"] = True
+            result["strength"] -= 1
+
+        # Volume-confirmed displacement (approximates inducement -> reversal displacement)
+        if volume is not None and len(volume) >= 31:
+            avg_vol = np.mean(volume[-31:-1])
+            if avg_vol > 0 and volume[-1] > avg_vol * 1.5 and displacement:
+                if close[-1] > open_p[-1]:
                     result["bullish"] = True
                     result["strength"] += 2
-                elif close[-1] < open_p[-1] and body_l > (high[-1] - low[-1]) * 0.6:
+                elif close[-1] < open_p[-1]:
                     result["bearish"] = True
                     result["strength"] -= 2
-        
+
         return result
     
     def _detect_fvg(self, ohlc: pd.DataFrame) -> Dict:
@@ -231,16 +285,23 @@ class AnalysisEngine:
                all(low[-i] < low[-i+j] for j in range(1, 4)):
                 swing_lows.append({"index": len(ohlc) - i, "level": low[-i]})
         
-        if swing_highs:
-            nearest_sh = max(sh for sh in swing_highs if sh["level"] > close[-1] * 0.99)
-            if nearest_sh and high[-1] >= nearest_sh["level"]:
+        # FIX (Crash Bug): filter first, then only call max()/min() with an
+        # explicit key on non-empty lists. The old code did
+        # max(sh for sh in swing_highs if ...) with no key, which raises
+        # ValueError on an empty generator and can also fail comparing dicts
+        # directly when there is more than one candidate.
+        candidate_highs = [sh for sh in swing_highs if sh["level"] > close[-1] * 0.99]
+        if candidate_highs:
+            nearest_sh = max(candidate_highs, key=lambda x: x["level"])
+            if high[-1] >= nearest_sh["level"]:
                 result["buyside_liquidity"] = nearest_sh["level"]
                 result["swept"] = True
                 result["recent_sweep"] = "buyside"
-                
-        if swing_lows:
-            nearest_sl = min(sl for sl in swing_lows if sl["level"] < close[-1] * 1.01)
-            if nearest_sl and low[-1] <= nearest_sl["level"]:
+
+        candidate_lows = [sl for sl in swing_lows if sl["level"] < close[-1] * 1.01]
+        if candidate_lows:
+            nearest_sl = min(candidate_lows, key=lambda x: x["level"])
+            if low[-1] <= nearest_sl["level"]:
                 result["sellside_liquidity"] = nearest_sl["level"]
                 result["swept"] = True
                 result["recent_sweep"] = "sellside"
@@ -316,51 +377,68 @@ class AnalysisEngine:
     
     def _calculate_profit_chance(self, results: Dict) -> float:
         """
-        Calculate profit chance percentage based on:
-        - Number of tools agreeing
-        - Signal strength
-        - Market structure alignment
-        Returns 0-100%
+        Calculate an estimated profit-chance score based on confluence strength.
+
+        FIX (Fake Math bug): the old formula was `50 + agreeing_tools * 8`.
+        Since MIN_TOOLS_MATCH defaults to 3, that meant 3 agreeing tools
+        ALWAYS produced 50 + 24 = 74%, which is already above the 65%
+        MIN_PROFIT_CHANCE filter — so the "profit chance" gate was never
+        actually able to reject a trade that already passed the tools-match
+        gate. It wasn't a real independent statistical estimate.
+
+        This version scores confluence out of 100 using components that are
+        NOT guaranteed to be satisfied just because MIN_TOOLS_MATCH is met,
+        so the profit-chance filter can genuinely reject weak setups even
+        when 3+ tools agree. This is still a heuristic score (not a
+        backtested statistical probability) — it should be tuned/validated
+        against real trade history, not treated as a guarantee.
         """
-        base_chance = 50.0  # Base 50%
-        
-        # Each agreeing tool adds 8%
+        total_tools = results.get("total_active_tools", 5) or 5
         agreeing = results.get("tools_agreeing", 0)
-        base_chance += agreeing * 8
-        
-        # Subtract for conflicting tools
-        if results["bullish_tools"] > 0 and results["bearish_tools"] > 0:
-            conflicting = min(results["bullish_tools"], results["bearish_tools"])
-            base_chance -= conflicting * 5
-        
-        # ICT strength boost
+        tool_ratio = agreeing / total_tools
+
+        # Tool agreement contributes up to 35 points (not enough alone to pass 65%)
+        score = tool_ratio * 35
+
+        # ICT/SMC confluence: displacement + PD-array/OTE alignment, up to ~20 points
         ict = results.get("ict_smc", {})
-        base_chance += ict.get("strength", 0) * 3
-        
-        # Market structure boost
+        ict_strength = abs(ict.get("strength", 0))
+        score += min(ict_strength, 5) * 4
+        if ict.get("displacement"):
+            score += 3
+        if ict.get("ote"):
+            score += 3
+
+        # Market structure confluence
         ms = results.get("market_structure", {})
         if ms.get("bos"):
-            base_chance += 5
+            score += 10
         if ms.get("choch"):
-            base_chance += 3
-        
-        # FVG not mitigated = good
+            score += 6
+
+        # Unmitigated FVG = the gap is still "fresh" / untested
         fvg = results.get("fvg", {})
-        if fvg.get("bullish_fvg") or fvg.get("bearish_fvg"):
-            if not fvg.get("mitigated"):
-                base_chance += 5
-        
-        # Liquidity sweep = extra confirmation
+        if (fvg.get("bullish_fvg") or fvg.get("bearish_fvg")) and not fvg.get("mitigated"):
+            score += 8
+
+        # Liquidity sweep confirmation (inducement -> reversal)
         liq = results.get("liquidity", {})
         if liq.get("swept"):
-            base_chance += 3
-        
-        # News sentiment boost
+            score += 7
+
+        # Conflicting tools reduce confidence
+        bullish_tools = results.get("bullish_tools", 0)
+        bearish_tools = results.get("bearish_tools", 0)
+        if bullish_tools > 0 and bearish_tools > 0:
+            conflicting = min(bullish_tools, bearish_tools)
+            score -= conflicting * 6
+
+        # News sentiment: small nudge, not a dominant factor
         news_sentiment = self._get_news_sentiment()
-        base_chance += news_sentiment * 10
-        
+        score += news_sentiment * 8
+
         # Clamp between 0-100
-        return max(0.0, min(100.0, base_chance))
+        return max(0.0, min(100.0, score))
     
     def is_trade_worth(self, results: Dict) -> Tuple[bool, str]:
         """
