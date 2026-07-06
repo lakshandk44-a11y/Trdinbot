@@ -7,6 +7,8 @@ Timeframes: 4h, 1h, 15m
 import pandas as pd
 import numpy as np
 import logging
+import os
+import json
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 import requests
@@ -20,6 +22,14 @@ class AnalysisEngine:
         self.config = config
         self.timeframes = config["TIMEFRAMES"]
         self.news_api_key = config.get("NEWS_API_KEY", "")
+
+        # CALIBRATION: if backtest_calibration.py has been run on real
+        # historical data, it writes a score -> actual-win-rate table to
+        # this file. Loaded once here and used (read-only) by
+        # _calculate_profit_chance(). If the file doesn't exist, everything
+        # behaves exactly as before - no behavior change.
+        self.calibration_table_file = config.get("CALIBRATION_TABLE_FILE", "calibration_table.json")
+        self._calibration_table = self._load_calibration_table()
         
     def calculate_all_indicators(self, ohlc: pd.DataFrame) -> Dict:
         """Run all 5 analysis tools on a single timeframe"""
@@ -438,7 +448,72 @@ class AnalysisEngine:
         score += news_sentiment * 8
 
         # Clamp between 0-100
-        return max(0.0, min(100.0, score))
+        raw_score = max(0.0, min(100.0, score))
+
+        # CALIBRATION: if backtest_calibration.py has produced a real
+        # historical calibration table, translate this raw heuristic score
+        # into the ACTUAL win-rate observed in history for setups that
+        # scored in this same range. If no table is loaded yet, or the
+        # matching bucket doesn't have enough backtested samples, this
+        # falls straight through to the original heuristic score below -
+        # nothing changes unless a real backtest has been run.
+        calibrated_score = self._get_calibrated_profit_chance(raw_score)
+        if calibrated_score is not None:
+            return calibrated_score
+
+        return raw_score
+
+    def _load_calibration_table(self) -> Optional[Dict]:
+        """
+        Load the score -> actual-win-rate calibration table produced by the
+        offline backtest script (backtest_calibration.py), if one exists.
+
+        Expected file format (written by backtest_calibration.py):
+        {
+            "generated_at": "...",
+            "buckets": {
+                "0-10":  {"win_rate": 8.3,  "samples": 41},
+                "10-20": {"win_rate": 15.1, "samples": 63},
+                ...
+                "90-100":{"win_rate": 71.4, "samples": 22}
+            }
+        }
+        """
+        try:
+            if os.path.exists(self.calibration_table_file):
+                with open(self.calibration_table_file, "r") as f:
+                    data = json.load(f)
+                buckets = data.get("buckets", {})
+                if buckets:
+                    logger.info(f"Loaded profit-chance calibration table from {self.calibration_table_file}")
+                    return buckets
+        except Exception as e:
+            logger.warning(f"Could not load calibration table ({self.calibration_table_file}): {e}")
+        return None
+
+    def _get_calibrated_profit_chance(self, raw_score: float) -> Optional[float]:
+        """
+        Look up the actual historical win-rate for the bucket the raw
+        heuristic score falls into. Returns None (meaning: fall back to the
+        raw heuristic score untouched) if there is no calibration table, or
+        the matching bucket doesn't have enough backtested samples yet.
+        """
+        if not self._calibration_table:
+            return None
+
+        bucket_floor = int(raw_score // 10) * 10
+        bucket_floor = min(bucket_floor, 90)  # clamp top bucket to "90-100"
+        bucket_key = f"{bucket_floor}-{bucket_floor + 10}"
+
+        bucket = self._calibration_table.get(bucket_key)
+        if not bucket:
+            return None
+
+        min_samples = self.config.get("CALIBRATION_MIN_SAMPLES", 20)
+        if bucket.get("samples", 0) < min_samples:
+            return None
+
+        return float(bucket.get("win_rate"))
     
     def is_trade_worth(self, results: Dict) -> Tuple[bool, str]:
         """
