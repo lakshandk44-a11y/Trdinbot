@@ -73,6 +73,27 @@ class BinanceFuturesClient:
             raise Exception(f"API Error {resp.status_code}: {resp.text}")
         return resp.json()
 
+    def _delete(self, path: str, params: dict = None) -> dict:
+        """
+        Signed DELETE request.
+        FIX: cancel_order() below used to send its request via _post() (HTTP
+        POST) to the order endpoint, which is Binance's "place a new order"
+        method, not "cancel an order" (that's HTTP DELETE). It never
+        surfaced before because cancel_order() wasn't actually called
+        anywhere in the bot, but it's needed now to manage exchange-side
+        SL/TP orders, so it has to send a real DELETE request.
+        """
+        if params is None:
+            params = {}
+        params["timestamp"] = int(time.time() * 1000)
+        params["recvWindow"] = 5000
+        params = self._sign(params)
+        url = f"{self.base_url}{path}"
+        resp = self.session.delete(url, params=params)
+        if resp.status_code != 200:
+            raise Exception(f"API Error {resp.status_code}: {resp.text}")
+        return resp.json()
+
     # ---- Futures API Methods ----
 
     def ping(self) -> dict:
@@ -85,6 +106,20 @@ class BinanceFuturesClient:
 
     def account(self) -> dict:
         return self._get("/fapi/v2/account")
+
+    def position_risk(self, symbol: str = None) -> list:
+        """
+        Get real current position(s) from Binance. Used to:
+        - reconcile local trade-tracking state with the real exchange
+          positions after a bot restart
+        - verify whether a position is actually still open before trying to
+          close it (e.g. an exchange-side SL/TP order may have already
+          closed it)
+        """
+        params = {}
+        if symbol:
+            params["symbol"] = symbol
+        return self._get("/fapi/v2/positionRisk", params)
 
     def exchange_info(self) -> dict:
         resp = self.session.get(f"{self.base_url}/fapi/v1/exchangeInfo")
@@ -116,15 +151,59 @@ class BinanceFuturesClient:
         })
 
     def new_order(self, symbol: str, side: str, type: str, quantity: float,
-                  reduceOnly: bool = False) -> dict:
+                  reduceOnly: bool = False, positionSide: str = None) -> dict:
         params = {
             "symbol": symbol,
             "side": side,
             "type": type,
             "quantity": quantity,
-            "reduceOnly": "true" if reduceOnly else "false"
         }
+        # FIX (Hedge Mode bug): Binance REJECTS orders that send both
+        # reduceOnly and positionSide. In Hedge (dual-side) Mode, the
+        # positionSide (LONG/SHORT) itself identifies which position an
+        # order applies to, so reduceOnly must NOT be sent. In One-way
+        # Mode, positionSide must NOT be sent, and reduceOnly is used
+        # instead. Previously this client never sent positionSide at all,
+        # so every order would fail on a Hedge Mode account.
+        if positionSide:
+            params["positionSide"] = positionSide
+        else:
+            params["reduceOnly"] = "true" if reduceOnly else "false"
         return self._post("/fapi/v1/order", params)
+
+    def new_stop_order(self, symbol: str, side: str, stop_price: float, quantity: float,
+                        order_type: str = "STOP_MARKET", reduce_only: bool = True,
+                        positionSide: str = None) -> dict:
+        """
+        Place a real resting STOP_MARKET or TAKE_PROFIT_MARKET order on the
+        exchange. Unlike the bot's own polling-based SL/TP check (which only
+        protects the position while this process is running), this order
+        lives on Binance's servers and will trigger even if the bot/VPS
+        goes offline.
+        """
+        params = {
+            "symbol": symbol,
+            "side": side,
+            "type": order_type,
+            "stopPrice": stop_price,
+            "quantity": quantity,
+            "workingType": "MARK_PRICE"
+        }
+        # FIX (Hedge Mode bug): see new_order() above for why reduceOnly and
+        # positionSide are mutually exclusive on Binance.
+        if positionSide:
+            params["positionSide"] = positionSide
+        else:
+            params["reduceOnly"] = "true" if reduce_only else "false"
+        return self._post("/fapi/v1/order", params)
+
+    def get_position_mode(self) -> dict:
+        """
+        FIX (Hedge Mode bug): check whether the account is in Hedge
+        (dual-side) Mode or One-way Mode. Needed so the bot can decide
+        whether to send positionSide on every order it places.
+        """
+        return self._get("/fapi/v1/positionSide/dual")
 
     def get_order(self, symbol: str, orderId: int = None, origClientOrderId: str = None) -> dict:
         params = {"symbol": symbol}
@@ -138,7 +217,7 @@ class BinanceFuturesClient:
         params = {"symbol": symbol}
         if orderId:
             params["orderId"] = orderId
-        return self._post("/fapi/v1/order", params)
+        return self._delete("/fapi/v1/order", params)
 
 
 class HackerAIBot:
@@ -166,9 +245,24 @@ class HackerAIBot:
         except Exception as e:
             logger.error(f"❌ Binance Futures connection failed: {e}")
 
+        # FIX (Hedge Mode bug): detect once at startup whether this Binance
+        # account is in Hedge (dual-side) Mode or One-way Mode. Every order
+        # the bot places (entry, SL, TP, trailing stop, close) needs to
+        # know this, since Hedge Mode requires a positionSide param that
+        # One-way Mode must NOT receive.
+        self.hedge_mode = False
+        try:
+            mode = self.client.get_position_mode()
+            self.hedge_mode = bool(mode.get("dualSidePosition", False))
+        except Exception as e:
+            logger.warning(f"⚠️ Could not determine position mode ({e}). "
+                            f"Assuming One-way Mode.")
+        logger.info(f"⚙️ Position Mode: {'HEDGE (Dual)' if self.hedge_mode else 'ONE-WAY'}")
+
         # Initialize engines
         self.analysis_engine = AnalysisEngine(config)
         self.trade_manager = TradeManager(config, self.client)
+        self.trade_manager.hedge_mode = self.hedge_mode
 
         # State
         self.balance = 0.0
@@ -177,6 +271,16 @@ class HackerAIBot:
         self.scan_count = 0
         self.consecutive_balance_errors = 0
         self.last_trade_time = {}
+
+        # FIX (Performance Bug): exchange_info() was being called via a fresh
+        # API request in BOTH _execute_trade() and _round_quantity() for every
+        # single trade attempt. When scanning 40+ coins this produced hundreds
+        # of duplicate heavy API calls per cycle and risked hitting Binance's
+        # rate limit. exchangeInfo barely changes, so it's now cached and
+        # refreshed at most once per hour (see _get_exchange_info()).
+        self._exchange_info_cache = None
+        self._exchange_info_cache_time = 0.0
+        self._exchange_info_ttl = 3600  # seconds
 
         logger.info("🤖 HackerAI Bot initialized (24/7 Mode)")
 
@@ -189,6 +293,12 @@ class HackerAIBot:
         self.running = True
         self.paused = False
         logger.info("🚀 HackerAI Bot STARTING in 24/7 mode...")
+
+        # FIX (Persistence Bug): cross-check any trades restored from disk
+        # against what's actually open on Binance right now, in case
+        # positions were closed (manually, or by an exchange-side SL/TP
+        # order) while the bot was offline.
+        self.trade_manager.reconcile_with_exchange()
 
         self.trade_manager.start_monitoring()
 
@@ -389,7 +499,7 @@ class HackerAIBot:
         coin_max_leverage = 20
 
         try:
-            info = self.client.exchange_info()
+            info = self._get_exchange_info()
             for s in info.get("symbols", []):
                 if s["symbol"] == symbol:
                     for f in s.get("filters", []):
@@ -485,11 +595,17 @@ class HackerAIBot:
         # Place order
         try:
             side = "BUY" if decision == "BUY" else "SELL"
+            # FIX (Hedge Mode bug): on a Hedge Mode account, entry orders
+            # must carry positionSide (LONG for BUY, SHORT for SELL) or
+            # Binance rejects them. On a One-way account, positionSide must
+            # be omitted entirely.
+            entry_position_side = ("LONG" if side == "BUY" else "SHORT") if self.hedge_mode else None
             order = self.client.new_order(
                 symbol=symbol,
                 side=side,
                 type="MARKET",
-                quantity=quantity
+                quantity=quantity,
+                positionSide=entry_position_side
             )
 
             logger.info(f"✅ TRADE: {side} {symbol} @ {current_price:.8f} | "
@@ -514,9 +630,35 @@ class HackerAIBot:
             )
             if trade:
                 trade["binance_order_id"] = order.get("orderId")
+                # FIX (Missing exchange-side protection): previously SL/TP
+                # only existed as numbers inside the bot's own memory,
+                # checked by a 5s polling loop. If the bot/VPS went down,
+                # the position had NO protection at all. Now real
+                # STOP_MARKET / TAKE_PROFIT_MARKET orders are placed on
+                # Binance itself, so protection survives even if this
+                # process is not running.
+                self.trade_manager.place_protective_orders(symbol, trade)
 
         except Exception as e:
             logger.error(f"❌ Order error for {symbol}: {e}")
+
+    def _get_exchange_info(self) -> dict:
+        """
+        FIX (Performance Bug): cached exchangeInfo lookup.
+        Refreshes at most once per self._exchange_info_ttl seconds instead of
+        making a fresh API call every time a trade is evaluated/executed.
+        """
+        now = time.time()
+        if (self._exchange_info_cache is None or
+                (now - self._exchange_info_cache_time) > self._exchange_info_ttl):
+            try:
+                self._exchange_info_cache = self.client.exchange_info()
+                self._exchange_info_cache_time = now
+            except Exception as e:
+                logger.debug(f"Exchange info fetch error: {e}")
+                if self._exchange_info_cache is None:
+                    return {"symbols": []}
+        return self._exchange_info_cache
 
     def _calculate_volatility(self, ohlc_data: Dict) -> float:
         """Calculate volatility from higher timeframe"""
@@ -533,7 +675,7 @@ class HackerAIBot:
     def _round_quantity(self, symbol: str, quantity: float) -> float:
         """Round quantity to exchange step size"""
         try:
-            info = self.client.exchange_info()
+            info = self._get_exchange_info()
             for s in info.get("symbols", []):
                 if s["symbol"] == symbol:
                     for f in s.get("filters", []):
