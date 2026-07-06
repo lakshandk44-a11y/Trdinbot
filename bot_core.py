@@ -36,16 +36,28 @@ class BinanceFuturesClient:
         self.session = requests.Session()
         self.session.headers.update({"X-MBX-APIKEY": api_key})
 
-    def _sign(self, params: dict) -> dict:
-        """Sign request parameters"""
+    def _sign(self, params: dict) -> str:
+        """
+        Build the exact query string that gets signed, and return it WITH
+        the signature already appended.
+
+        FIX: previously this returned a dict with params["signature"] set,
+        and the caller passed that dict straight to requests' `params=`.
+        requests encodes a dict in insertion order, but the signature here
+        was computed over a *sorted* (alphabetical) version of the same
+        params. So the string Binance received never matched the string
+        that was actually signed -> "Signature for this request is not
+        valid" (-1022) on every single signed call. Returning the final,
+        already-ordered query string (and sending that exact string, not a
+        dict) guarantees the bytes signed == the bytes sent.
+        """
         query_string = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
         signature = hmac.new(
             self.api_secret.encode("utf-8"),
             query_string.encode("utf-8"),
             hashlib.sha256
         ).hexdigest()
-        params["signature"] = signature
-        return params
+        return f"{query_string}&signature={signature}"
 
     def _get(self, path: str, params: dict = None) -> dict:
         """Signed GET request"""
@@ -53,9 +65,9 @@ class BinanceFuturesClient:
             params = {}
         params["timestamp"] = int(time.time() * 1000)
         params["recvWindow"] = 5000
-        params = self._sign(params)
-        url = f"{self.base_url}{path}"
-        resp = self.session.get(url, params=params)
+        query_string = self._sign(params)
+        url = f"{self.base_url}{path}?{query_string}"
+        resp = self.session.get(url)
         if resp.status_code != 200:
             raise Exception(f"API Error {resp.status_code}: {resp.text}")
         return resp.json()
@@ -66,9 +78,9 @@ class BinanceFuturesClient:
             params = {}
         params["timestamp"] = int(time.time() * 1000)
         params["recvWindow"] = 5000
-        params = self._sign(params)
-        url = f"{self.base_url}{path}"
-        resp = self.session.post(url, params=params)
+        query_string = self._sign(params)
+        url = f"{self.base_url}{path}?{query_string}"
+        resp = self.session.post(url)
         if resp.status_code != 200:
             raise Exception(f"API Error {resp.status_code}: {resp.text}")
         return resp.json()
@@ -87,9 +99,9 @@ class BinanceFuturesClient:
             params = {}
         params["timestamp"] = int(time.time() * 1000)
         params["recvWindow"] = 5000
-        params = self._sign(params)
-        url = f"{self.base_url}{path}"
-        resp = self.session.delete(url, params=params)
+        query_string = self._sign(params)
+        url = f"{self.base_url}{path}?{query_string}"
+        resp = self.session.delete(url)
         if resp.status_code != 200:
             raise Exception(f"API Error {resp.status_code}: {resp.text}")
         return resp.json()
@@ -151,29 +163,18 @@ class BinanceFuturesClient:
         })
 
     def new_order(self, symbol: str, side: str, type: str, quantity: float,
-                  reduceOnly: bool = False, positionSide: str = None) -> dict:
+                  reduceOnly: bool = False) -> dict:
         params = {
             "symbol": symbol,
             "side": side,
             "type": type,
             "quantity": quantity,
+            "reduceOnly": "true" if reduceOnly else "false"
         }
-        # FIX (Hedge Mode bug): Binance REJECTS orders that send both
-        # reduceOnly and positionSide. In Hedge (dual-side) Mode, the
-        # positionSide (LONG/SHORT) itself identifies which position an
-        # order applies to, so reduceOnly must NOT be sent. In One-way
-        # Mode, positionSide must NOT be sent, and reduceOnly is used
-        # instead. Previously this client never sent positionSide at all,
-        # so every order would fail on a Hedge Mode account.
-        if positionSide:
-            params["positionSide"] = positionSide
-        else:
-            params["reduceOnly"] = "true" if reduceOnly else "false"
         return self._post("/fapi/v1/order", params)
 
     def new_stop_order(self, symbol: str, side: str, stop_price: float, quantity: float,
-                        order_type: str = "STOP_MARKET", reduce_only: bool = True,
-                        positionSide: str = None) -> dict:
+                        order_type: str = "STOP_MARKET", reduce_only: bool = True) -> dict:
         """
         Place a real resting STOP_MARKET or TAKE_PROFIT_MARKET order on the
         exchange. Unlike the bot's own polling-based SL/TP check (which only
@@ -187,23 +188,10 @@ class BinanceFuturesClient:
             "type": order_type,
             "stopPrice": stop_price,
             "quantity": quantity,
+            "reduceOnly": "true" if reduce_only else "false",
             "workingType": "MARK_PRICE"
         }
-        # FIX (Hedge Mode bug): see new_order() above for why reduceOnly and
-        # positionSide are mutually exclusive on Binance.
-        if positionSide:
-            params["positionSide"] = positionSide
-        else:
-            params["reduceOnly"] = "true" if reduce_only else "false"
         return self._post("/fapi/v1/order", params)
-
-    def get_position_mode(self) -> dict:
-        """
-        FIX (Hedge Mode bug): check whether the account is in Hedge
-        (dual-side) Mode or One-way Mode. Needed so the bot can decide
-        whether to send positionSide on every order it places.
-        """
-        return self._get("/fapi/v1/positionSide/dual")
 
     def get_order(self, symbol: str, orderId: int = None, origClientOrderId: str = None) -> dict:
         params = {"symbol": symbol}
@@ -245,24 +233,9 @@ class HackerAIBot:
         except Exception as e:
             logger.error(f"❌ Binance Futures connection failed: {e}")
 
-        # FIX (Hedge Mode bug): detect once at startup whether this Binance
-        # account is in Hedge (dual-side) Mode or One-way Mode. Every order
-        # the bot places (entry, SL, TP, trailing stop, close) needs to
-        # know this, since Hedge Mode requires a positionSide param that
-        # One-way Mode must NOT receive.
-        self.hedge_mode = False
-        try:
-            mode = self.client.get_position_mode()
-            self.hedge_mode = bool(mode.get("dualSidePosition", False))
-        except Exception as e:
-            logger.warning(f"⚠️ Could not determine position mode ({e}). "
-                            f"Assuming One-way Mode.")
-        logger.info(f"⚙️ Position Mode: {'HEDGE (Dual)' if self.hedge_mode else 'ONE-WAY'}")
-
         # Initialize engines
         self.analysis_engine = AnalysisEngine(config)
         self.trade_manager = TradeManager(config, self.client)
-        self.trade_manager.hedge_mode = self.hedge_mode
 
         # State
         self.balance = 0.0
@@ -595,17 +568,11 @@ class HackerAIBot:
         # Place order
         try:
             side = "BUY" if decision == "BUY" else "SELL"
-            # FIX (Hedge Mode bug): on a Hedge Mode account, entry orders
-            # must carry positionSide (LONG for BUY, SHORT for SELL) or
-            # Binance rejects them. On a One-way account, positionSide must
-            # be omitted entirely.
-            entry_position_side = ("LONG" if side == "BUY" else "SHORT") if self.hedge_mode else None
             order = self.client.new_order(
                 symbol=symbol,
                 side=side,
                 type="MARKET",
-                quantity=quantity,
-                positionSide=entry_position_side
+                quantity=quantity
             )
 
             logger.info(f"✅ TRADE: {side} {symbol} @ {current_price:.8f} | "
