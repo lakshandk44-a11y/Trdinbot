@@ -87,6 +87,18 @@ TRAILING_STOP_ACTIVATE = 0.5   # Activate trailing at 0.5% profit
 TRAILING_STOP_DISTANCE = 0.3   # Trailing stop distance 0.3%
 MAX_OPEN_TRADES = 15           # Maximum concurrent trades
 
+# FIX (Real win-rate): Binance USDT-M futures taker fee, charged on BOTH
+# the entry fill and the exit fill. Used to subtract real trading cost
+# from a closed trade's PnL so the win-rate stat reflects actual net
+# results instead of just the raw ideal entry/exit price move.
+TRADING_FEE_PERCENT = 0.05     # % per side (Binance default taker fee)
+
+# ============================================================
+# STATE PERSISTENCE (FIX: survive bot/VPS restarts without losing
+# track of open positions and their SL/TP levels)
+# ============================================================
+TRADE_STATE_FILE = os.getenv("TRADE_STATE_FILE", "trade_state.json")
+
 # ============================================================
 # LOGGING
 # ============================================================
