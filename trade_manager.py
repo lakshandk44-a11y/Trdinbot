@@ -214,19 +214,28 @@ class TradeManager:
                 if s["symbol"] == symbol:
                     for f in s.get("filters", []):
                         if f["filterType"] == "PRICE_FILTER":
-                            # FIX (Precision bug): same issue as quantity
-                            # rounding — tickSize from Binance always has
-                            # trailing zeros (e.g. "1.00000000"), and
-                            # float()->str() collapses that to "1.0",
-                            # which forced one decimal place even on
-                            # symbols with 0 decimal price precision.
-                            # normalize() on the exact string strips the
-                            # fake trailing zeros so SL/TP prices match
-                            # the symbol's REAL tick precision.
-                            tick_size = Decimal(f["tickSize"]).normalize()
-                            if tick_size > 0:
+                            tick_size_str = f["tickSize"]
+                            if float(tick_size_str) > 0:
+                                # FIX (real bug, same root cause as the
+                                # quantity precision bug): Decimal.quantize()
+                                # rounds to match the number of decimal
+                                # PLACES of its argument, not to a multiple
+                                # of its value. Binance sends tickSize
+                                # strings like "0.10000000" or "1.00000000"
+                                # (trailing zeros) — using tick_size = float(...)
+                                # then str(tick_size) back loses those extra
+                                # zeros' meaning and can leave the rounded
+                                # price with more decimals than the symbol
+                                # actually allows, which Binance rejects as
+                                # "Precision is over the maximum defined for
+                                # this asset." normalize() strips the
+                                # trailing zeros so quantizing matches the
+                                # real precision (e.g. "1.00000000" -> "1").
+                                tick = Decimal(tick_size_str).normalize()
+                                if tick == tick.to_integral_value():
+                                    tick = tick.quantize(Decimal(1))
                                 price = float(Decimal(str(price)).quantize(
-                                    tick_size, rounding=ROUND_HALF_UP
+                                    tick, rounding=ROUND_HALF_UP
                                 ))
                             return price
         except Exception as e:
