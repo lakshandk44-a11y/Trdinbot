@@ -214,10 +214,19 @@ class TradeManager:
                 if s["symbol"] == symbol:
                     for f in s.get("filters", []):
                         if f["filterType"] == "PRICE_FILTER":
-                            tick_size = float(f["tickSize"])
+                            # FIX (Precision bug): same issue as quantity
+                            # rounding — tickSize from Binance always has
+                            # trailing zeros (e.g. "1.00000000"), and
+                            # float()->str() collapses that to "1.0",
+                            # which forced one decimal place even on
+                            # symbols with 0 decimal price precision.
+                            # normalize() on the exact string strips the
+                            # fake trailing zeros so SL/TP prices match
+                            # the symbol's REAL tick precision.
+                            tick_size = Decimal(f["tickSize"]).normalize()
                             if tick_size > 0:
                                 price = float(Decimal(str(price)).quantize(
-                                    Decimal(str(tick_size)), rounding=ROUND_HALF_UP
+                                    tick_size, rounding=ROUND_HALF_UP
                                 ))
                             return price
         except Exception as e:
