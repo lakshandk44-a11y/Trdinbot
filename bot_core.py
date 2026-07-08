@@ -51,13 +51,29 @@ class BinanceFuturesClient:
         already-ordered query string (and sending that exact string, not a
         dict) guarantees the bytes signed == the bytes sent.
         """
-        query_string = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
+        query_string = "&".join([f"{k}={self._format_value(v)}" for k, v in sorted(params.items())])
         signature = hmac.new(
             self.api_secret.encode("utf-8"),
             query_string.encode("utf-8"),
             hashlib.sha256
         ).hexdigest()
         return f"{query_string}&signature={signature}"
+
+    @staticmethod
+    def _format_value(v) -> str:
+        """
+        FIX (Precision bug): Python's default str()/f-string formatting for
+        a float switches to scientific notation for very small or very
+        large numbers (e.g. 0.00001234 -> "1.234e-05"). Binance's API does
+        not accept exponential notation for quantity/price fields and
+        rejects it as invalid precision. This formats floats as plain
+        decimal strings instead, with trailing zeros/dot stripped, leaving
+        all other types (str, int, bool) untouched.
+        """
+        if isinstance(v, float):
+            s = f"{v:.8f}".rstrip("0").rstrip(".")
+            return s if s else "0"
+        return str(v)
 
     def _get(self, path: str, params: dict = None) -> dict:
         """Signed GET request"""
@@ -673,12 +689,20 @@ class HackerAIBot:
                                 step_size = float(f["stepSize"])
                                 break
                     if step_size:
-                        quantity = float(Decimal(str(quantity)).quantize(
+                        rounded = float(Decimal(str(quantity)).quantize(
                             Decimal(str(step_size)), rounding=ROUND_DOWN
                         ))
-                        return quantity
-        except Exception:
-            pass
+                        logger.debug(f"🔧 {symbol}: qty {quantity!r} -> step {step_size!r} "
+                                     f"-> rounded {rounded!r}")
+                        return rounded
+                    logger.warning(f"⚠️ {symbol}: no LOT_SIZE/MARKET_LOT_SIZE filter found, "
+                                    f"sending unrounded quantity {quantity!r}")
+                    return quantity
+            logger.warning(f"⚠️ {symbol}: symbol not found in exchangeInfo, "
+                            f"sending unrounded quantity {quantity!r}")
+        except Exception as e:
+            logger.warning(f"⚠️ {symbol}: quantity rounding failed ({e}), "
+                            f"sending unrounded quantity {quantity!r}")
         return quantity
 
     def _update_open_trades(self):
