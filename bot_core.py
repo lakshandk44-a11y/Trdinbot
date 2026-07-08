@@ -163,7 +163,7 @@ class BinanceFuturesClient:
         })
 
     def new_order(self, symbol: str, side: str, type: str, quantity: float,
-                  reduceOnly: bool = False, positionSide: str = None) -> dict:
+                  reduceOnly: bool = False) -> dict:
         params = {
             "symbol": symbol,
             "side": side,
@@ -171,17 +171,6 @@ class BinanceFuturesClient:
             "quantity": quantity,
             "reduceOnly": "true" if reduceOnly else "false"
         }
-        # FIX (Hedge Mode bug): trade_manager passes positionSide so it can
-        # identify which side (LONG/SHORT) to close on a Hedge Mode account.
-        # This method previously had no such parameter at all, so every
-        # call from trade_manager crashed with "unexpected keyword argument
-        # 'positionSide'" — even in normal One-way Mode where it's just
-        # None. Binance also rejects reduceOnly+positionSide together, so
-        # only send positionSide when it's actually set (Hedge Mode), and
-        # drop reduceOnly in that case.
-        if positionSide:
-            params["positionSide"] = positionSide
-            params.pop("reduceOnly", None)
         return self._post("/fapi/v1/order", params)
 
     def new_stop_order(self, symbol: str, side: str, stop_price: float, quantity: float,
@@ -193,23 +182,37 @@ class BinanceFuturesClient:
         protects the position while this process is running), this order
         lives on Binance's servers and will trigger even if the bot/VPS
         goes offline.
+
+        FIX (Binance Algo Order migration, effective 2025-12-09): conditional
+        order types (STOP_MARKET, TAKE_PROFIT_MARKET, etc.) are no longer
+        accepted on the regular /fapi/v1/order endpoint -> Binance now
+        rejects them with error -4120 ("Order type not supported for this
+        endpoint. Please use the Algo Order API endpoints instead."). These
+        orders must now go through the dedicated /fapi/v1/algoOrder
+        endpoint instead. The response field is "algoId" rather than
+        "orderId", so it's mirrored into "orderId" here too, keeping every
+        existing caller (which reads order.get("orderId")) working
+        unchanged.
         """
         params = {
+            "algoType": "CONDITIONAL",
             "symbol": symbol,
             "side": side,
             "type": order_type,
-            "stopPrice": stop_price,
+            "triggerPrice": stop_price,
             "quantity": quantity,
-            "reduceOnly": "true" if reduce_only else "false",
             "workingType": "MARK_PRICE"
         }
-        # FIX (Hedge Mode bug): same missing-parameter crash as new_order()
-        # above. Only send positionSide when set (Hedge Mode), and drop
-        # reduceOnly in that case since Binance rejects the combination.
         if positionSide:
             params["positionSide"] = positionSide
-            params.pop("reduceOnly", None)
-        return self._post("/fapi/v1/order", params)
+        else:
+            # reduceOnly cannot be sent together with positionSide (Hedge
+            # Mode) on the Algo Order endpoint, so only include it here.
+            params["reduceOnly"] = "true" if reduce_only else "false"
+        order = self._post("/fapi/v1/algoOrder", params)
+        if "algoId" in order and "orderId" not in order:
+            order["orderId"] = order["algoId"]
+        return order
 
     def get_order(self, symbol: str, orderId: int = None, origClientOrderId: str = None) -> dict:
         params = {"symbol": symbol}
@@ -220,10 +223,18 @@ class BinanceFuturesClient:
         return self._get("/fapi/v1/order", params)
 
     def cancel_order(self, symbol: str, orderId: int = None) -> dict:
+        """
+        Cancel a resting order. The only orders this bot ever cancels via
+        this method are the exchange-side SL/TP conditional orders created
+        by new_stop_order() above, which now live in the Algo Order system
+        -> FIX (Binance Algo Order migration): cancellation must likewise
+        go through DELETE /fapi/v1/algoOrder using algoId instead of
+        DELETE /fapi/v1/order using orderId.
+        """
         params = {"symbol": symbol}
         if orderId:
-            params["orderId"] = orderId
-        return self._delete("/fapi/v1/order", params)
+            params["algoId"] = orderId
+        return self._delete("/fapi/v1/algoOrder", params)
 
 
 class HackerAIBot:
@@ -669,21 +680,9 @@ class HackerAIBot:
                 if s["symbol"] == symbol:
                     for f in s.get("filters", []):
                         if f["filterType"] == "LOT_SIZE":
-                            # FIX (Precision bug): stepSize from Binance is
-                            # always given with trailing zeros, e.g.
-                            # "1.00000000". Converting that through float()
-                            # and back to str() gave "1.0", so quantize()
-                            # kept one decimal place even for symbols whose
-                            # real allowed precision is 0 decimals (e.g.
-                            # POWERUSDT). Binance then rejected the order
-                            # with "Precision is over the maximum defined
-                            # for this asset." Using the exact stepSize
-                            # string with normalize() strips those fake
-                            # trailing zeros so quantity is rounded to the
-                            # symbol's REAL precision.
-                            step_size = Decimal(f["stepSize"]).normalize()
+                            step_size = float(f["stepSize"])
                             quantity = float(Decimal(str(quantity)).quantize(
-                                step_size, rounding=ROUND_DOWN
+                                Decimal(str(step_size)), rounding=ROUND_DOWN
                             ))
                             return quantity
         except Exception:
