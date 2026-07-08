@@ -654,13 +654,29 @@ class HackerAIBot:
             info = self._get_exchange_info()
             for s in info.get("symbols", []):
                 if s["symbol"] == symbol:
+                    # FIX (Precision bug): all orders this bot places are
+                    # MARKET orders, and Binance validates MARKET order
+                    # quantity against the "MARKET_LOT_SIZE" filter, which
+                    # can have a different (usually coarser) stepSize than
+                    # "LOT_SIZE". Rounding to LOT_SIZE alone can still be
+                    # too precise for a MARKET order and trigger
+                    # "Precision is over the maximum defined for this asset."
+                    # Prefer MARKET_LOT_SIZE; fall back to LOT_SIZE if absent.
+                    step_size = None
                     for f in s.get("filters", []):
-                        if f["filterType"] == "LOT_SIZE":
+                        if f["filterType"] == "MARKET_LOT_SIZE":
                             step_size = float(f["stepSize"])
-                            quantity = float(Decimal(str(quantity)).quantize(
-                                Decimal(str(step_size)), rounding=ROUND_DOWN
-                            ))
-                            return quantity
+                            break
+                    if step_size is None:
+                        for f in s.get("filters", []):
+                            if f["filterType"] == "LOT_SIZE":
+                                step_size = float(f["stepSize"])
+                                break
+                    if step_size:
+                        quantity = float(Decimal(str(quantity)).quantize(
+                            Decimal(str(step_size)), rounding=ROUND_DOWN
+                        ))
+                        return quantity
         except Exception:
             pass
         return quantity
