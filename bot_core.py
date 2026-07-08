@@ -670,30 +670,41 @@ class HackerAIBot:
             info = self._get_exchange_info()
             for s in info.get("symbols", []):
                 if s["symbol"] == symbol:
-                    # FIX (Precision bug): all orders this bot places are
-                    # MARKET orders, and Binance validates MARKET order
-                    # quantity against the "MARKET_LOT_SIZE" filter, which
-                    # can have a different (usually coarser) stepSize than
-                    # "LOT_SIZE". Rounding to LOT_SIZE alone can still be
-                    # too precise for a MARKET order and trigger
-                    # "Precision is over the maximum defined for this asset."
-                    # Prefer MARKET_LOT_SIZE; fall back to LOT_SIZE if absent.
-                    step_size = None
+                    # FIX (Precision bug, root cause): all orders this bot
+                    # places are MARKET orders, and Binance validates MARKET
+                    # order quantity against the "MARKET_LOT_SIZE" filter,
+                    # which can have a different (usually coarser) stepSize
+                    # than "LOT_SIZE". Prefer MARKET_LOT_SIZE; fall back to
+                    # LOT_SIZE if absent.
+                    step_size_str = None
                     for f in s.get("filters", []):
                         if f["filterType"] == "MARKET_LOT_SIZE":
-                            step_size = float(f["stepSize"])
+                            step_size_str = f["stepSize"]
                             break
-                    if step_size is None:
+                    if step_size_str is None:
                         for f in s.get("filters", []):
                             if f["filterType"] == "LOT_SIZE":
-                                step_size = float(f["stepSize"])
+                                step_size_str = f["stepSize"]
                                 break
-                    if step_size:
+                    if step_size_str and float(step_size_str) > 0:
+                        # FIX (real bug): Decimal.quantize() rounds to match
+                        # the number of decimal PLACES of its argument, not
+                        # to a multiple of its value. Binance sends stepSize
+                        # strings like "1.00000000" (trailing zeros) — used
+                        # as-is, that forces quantizing to 8 decimal places
+                        # instead of to whole numbers, leaving extra
+                        # decimals that Binance then rejects as over-precise.
+                        # normalize() strips the trailing zeros so the
+                        # quantize step actually matches the real precision
+                        # (e.g. "1.00000000" -> "1", "0.00100000" -> "0.001").
+                        step = Decimal(step_size_str).normalize()
+                        if step == step.to_integral_value():
+                            step = step.quantize(Decimal(1))
                         rounded = float(Decimal(str(quantity)).quantize(
-                            Decimal(str(step_size)), rounding=ROUND_DOWN
+                            step, rounding=ROUND_DOWN
                         ))
-                        logger.debug(f"🔧 {symbol}: qty {quantity!r} -> step {step_size!r} "
-                                     f"-> rounded {rounded!r}")
+                        logger.debug(f"🔧 {symbol}: qty {quantity!r} -> step "
+                                     f"{step_size_str!r} -> rounded {rounded!r}")
                         return rounded
                     logger.warning(f"⚠️ {symbol}: no LOT_SIZE/MARKET_LOT_SIZE filter found, "
                                     f"sending unrounded quantity {quantity!r}")
