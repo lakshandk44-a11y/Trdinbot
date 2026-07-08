@@ -203,12 +203,23 @@ class BinanceFuturesClient:
         protects the position while this process is running), this order
         lives on Binance's servers and will trigger even if the bot/VPS
         goes offline.
+
+        FIX (Binance Algo Order migration, effective 2025-12-09): Binance
+        stopped accepting STOP_MARKET/TAKE_PROFIT_MARKET on the classic
+        POST /fapi/v1/order endpoint (error -4120: "Order type not
+        supported for this endpoint. Please use the Algo Order API
+        endpoints instead."). Conditional order types now must go through
+        the dedicated Algo Order API (POST /fapi/v1/algoOrder), which also
+        renames stopPrice -> triggerPrice and requires algoType=CONDITIONAL.
+        That endpoint returns "algoId" instead of "orderId", so the result
+        is normalized here to also carry "orderId" for callers.
         """
         params = {
+            "algoType": "CONDITIONAL",
             "symbol": symbol,
             "side": side,
             "type": order_type,
-            "stopPrice": stop_price,
+            "triggerPrice": stop_price,
             "quantity": quantity,
             "workingType": "MARK_PRICE"
         }
@@ -221,7 +232,10 @@ class BinanceFuturesClient:
             params["positionSide"] = positionSide
         else:
             params["reduceOnly"] = "true" if reduce_only else "false"
-        return self._post("/fapi/v1/order", params)
+        result = self._post("/fapi/v1/algoOrder", params)
+        if "algoId" in result and "orderId" not in result:
+            result["orderId"] = result["algoId"]
+        return result
 
     def get_order(self, symbol: str, orderId: int = None, origClientOrderId: str = None) -> dict:
         params = {"symbol": symbol}
@@ -232,10 +246,18 @@ class BinanceFuturesClient:
         return self._get("/fapi/v1/order", params)
 
     def cancel_order(self, symbol: str, orderId: int = None) -> dict:
-        params = {"symbol": symbol}
+        """
+        FIX (Binance Algo Order migration): this is only ever called (from
+        trade_manager.py) to cancel the resting SL/TP orders placed via
+        new_stop_order(), which now live in Binance's Algo Order system.
+        Those must be cancelled via DELETE /fapi/v1/algoOrder using
+        algoId — the same value new_stop_order() returns (and stores) as
+        "orderId", so no caller changes are needed.
+        """
+        params = {}
         if orderId:
-            params["orderId"] = orderId
-        return self._delete("/fapi/v1/order", params)
+            params["algoId"] = orderId
+        return self._delete("/fapi/v1/algoOrder", params)
 
 
 class HackerAIBot:
