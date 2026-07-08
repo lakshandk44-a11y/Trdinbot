@@ -163,7 +163,7 @@ class BinanceFuturesClient:
         })
 
     def new_order(self, symbol: str, side: str, type: str, quantity: float,
-                  reduceOnly: bool = False) -> dict:
+                  reduceOnly: bool = False, positionSide: str = None) -> dict:
         params = {
             "symbol": symbol,
             "side": side,
@@ -171,10 +171,16 @@ class BinanceFuturesClient:
             "quantity": quantity,
             "reduceOnly": "true" if reduceOnly else "false"
         }
+        # FIX (Hedge Mode bug): only send positionSide when the caller
+        # actually provides one (Hedge Mode accounts). One-way Mode accounts
+        # must NOT receive this param or Binance rejects the request.
+        if positionSide:
+            params["positionSide"] = positionSide
         return self._post("/fapi/v1/order", params)
 
     def new_stop_order(self, symbol: str, side: str, stop_price: float, quantity: float,
-                        order_type: str = "STOP_MARKET", reduce_only: bool = True) -> dict:
+                        order_type: str = "STOP_MARKET", reduce_only: bool = True,
+                        positionSide: str = None) -> dict:
         """
         Place a real resting STOP_MARKET or TAKE_PROFIT_MARKET order on the
         exchange. Unlike the bot's own polling-based SL/TP check (which only
@@ -191,6 +197,11 @@ class BinanceFuturesClient:
             "reduceOnly": "true" if reduce_only else "false",
             "workingType": "MARK_PRICE"
         }
+        # FIX (Hedge Mode bug): only send positionSide when the caller
+        # actually provides one (Hedge Mode accounts). One-way Mode accounts
+        # must NOT receive this param or Binance rejects the request.
+        if positionSide:
+            params["positionSide"] = positionSide
         return self._post("/fapi/v1/order", params)
 
     def get_order(self, symbol: str, orderId: int = None, origClientOrderId: str = None) -> dict:
