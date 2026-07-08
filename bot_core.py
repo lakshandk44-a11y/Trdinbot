@@ -195,7 +195,8 @@ class BinanceFuturesClient:
         return self._post("/fapi/v1/order", params)
 
     def new_stop_order(self, symbol: str, side: str, stop_price: float, quantity: float,
-                        order_type: str = "STOP_MARKET", reduce_only: bool = True) -> dict:
+                        order_type: str = "STOP_MARKET", reduce_only: bool = True,
+                        positionSide: str = None) -> dict:
         """
         Place a real resting STOP_MARKET or TAKE_PROFIT_MARKET order on the
         exchange. Unlike the bot's own polling-based SL/TP check (which only
@@ -209,9 +210,17 @@ class BinanceFuturesClient:
             "type": order_type,
             "stopPrice": stop_price,
             "quantity": quantity,
-            "reduceOnly": "true" if reduce_only else "false",
             "workingType": "MARK_PRICE"
         }
+        # FIX: accept positionSide (needed for Hedge Mode accounts), same as
+        # new_order(). Binance rejects reduceOnly + positionSide together,
+        # so on a Hedge Mode account send positionSide (which already
+        # identifies the position being protected) and omit reduceOnly; on
+        # a One-way account keep sending reduceOnly exactly as before.
+        if positionSide:
+            params["positionSide"] = positionSide
+        else:
+            params["reduceOnly"] = "true" if reduce_only else "false"
         return self._post("/fapi/v1/order", params)
 
     def get_order(self, symbol: str, orderId: int = None, origClientOrderId: str = None) -> dict:
