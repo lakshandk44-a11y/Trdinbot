@@ -36,26 +36,6 @@ class BinanceFuturesClient:
         self.session = requests.Session()
         self.session.headers.update({"X-MBX-APIKEY": api_key})
 
-    @staticmethod
-    def _format_param(value):
-        """
-        FIX (Precision bug): numeric params (quantity, stopPrice, etc.) were
-        being dropped straight into the query string with an f-string, so a
-        whole-number float like 249.0 was sent to Binance as the literal
-        text "249.0". For symbols whose quantity/price precision is 0 (or
-        fewer decimals than that), Binance rejects this with
-        API Error 400: {"code":-1111,"msg":"Precision is over the maximum
-        defined for this asset."} even though the numeric value itself was
-        already rounded correctly by _round_quantity(). Formatting floats
-        as fixed-point and trimming unnecessary trailing zeros/decimal
-        point (249.0 -> "249", 249.860000 -> "249.86") sends exactly the
-        precision Binance expects.
-        """
-        if isinstance(value, float):
-            formatted = f"{value:.8f}".rstrip("0").rstrip(".")
-            return formatted if formatted else "0"
-        return str(value)
-
     def _sign(self, params: dict) -> str:
         """
         Build the exact query string that gets signed, and return it WITH
@@ -71,9 +51,7 @@ class BinanceFuturesClient:
         already-ordered query string (and sending that exact string, not a
         dict) guarantees the bytes signed == the bytes sent.
         """
-        query_string = "&".join(
-            [f"{k}={self._format_param(v)}" for k, v in sorted(params.items())]
-        )
+        query_string = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
         signature = hmac.new(
             self.api_secret.encode("utf-8"),
             query_string.encode("utf-8"),
@@ -185,7 +163,7 @@ class BinanceFuturesClient:
         })
 
     def new_order(self, symbol: str, side: str, type: str, quantity: float,
-                  reduceOnly: bool = False) -> dict:
+                  reduceOnly: bool = False, positionSide: str = None) -> dict:
         params = {
             "symbol": symbol,
             "side": side,
@@ -193,10 +171,22 @@ class BinanceFuturesClient:
             "quantity": quantity,
             "reduceOnly": "true" if reduceOnly else "false"
         }
+        # FIX (Hedge Mode bug): trade_manager passes positionSide so it can
+        # identify which side (LONG/SHORT) to close on a Hedge Mode account.
+        # This method previously had no such parameter at all, so every
+        # call from trade_manager crashed with "unexpected keyword argument
+        # 'positionSide'" — even in normal One-way Mode where it's just
+        # None. Binance also rejects reduceOnly+positionSide together, so
+        # only send positionSide when it's actually set (Hedge Mode), and
+        # drop reduceOnly in that case.
+        if positionSide:
+            params["positionSide"] = positionSide
+            params.pop("reduceOnly", None)
         return self._post("/fapi/v1/order", params)
 
     def new_stop_order(self, symbol: str, side: str, stop_price: float, quantity: float,
-                        order_type: str = "STOP_MARKET", reduce_only: bool = True) -> dict:
+                        order_type: str = "STOP_MARKET", reduce_only: bool = True,
+                        positionSide: str = None) -> dict:
         """
         Place a real resting STOP_MARKET or TAKE_PROFIT_MARKET order on the
         exchange. Unlike the bot's own polling-based SL/TP check (which only
@@ -213,6 +203,12 @@ class BinanceFuturesClient:
             "reduceOnly": "true" if reduce_only else "false",
             "workingType": "MARK_PRICE"
         }
+        # FIX (Hedge Mode bug): same missing-parameter crash as new_order()
+        # above. Only send positionSide when set (Hedge Mode), and drop
+        # reduceOnly in that case since Binance rejects the combination.
+        if positionSide:
+            params["positionSide"] = positionSide
+            params.pop("reduceOnly", None)
         return self._post("/fapi/v1/order", params)
 
     def get_order(self, symbol: str, orderId: int = None, origClientOrderId: str = None) -> dict:
@@ -673,9 +669,21 @@ class HackerAIBot:
                 if s["symbol"] == symbol:
                     for f in s.get("filters", []):
                         if f["filterType"] == "LOT_SIZE":
-                            step_size = float(f["stepSize"])
+                            # FIX (Precision bug): stepSize from Binance is
+                            # always given with trailing zeros, e.g.
+                            # "1.00000000". Converting that through float()
+                            # and back to str() gave "1.0", so quantize()
+                            # kept one decimal place even for symbols whose
+                            # real allowed precision is 0 decimals (e.g.
+                            # POWERUSDT). Binance then rejected the order
+                            # with "Precision is over the maximum defined
+                            # for this asset." Using the exact stepSize
+                            # string with normalize() strips those fake
+                            # trailing zeros so quantity is rounded to the
+                            # symbol's REAL precision.
+                            step_size = Decimal(f["stepSize"]).normalize()
                             quantity = float(Decimal(str(quantity)).quantize(
-                                Decimal(str(step_size)), rounding=ROUND_DOWN
+                                step_size, rounding=ROUND_DOWN
                             ))
                             return quantity
         except Exception:
