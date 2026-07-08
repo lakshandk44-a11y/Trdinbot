@@ -528,7 +528,11 @@ class HackerAIBot:
                     f"Position=${final_position:.2f}")
 
         # Get current price
-        lower_tf = ohlc_data.get("lower") or ohlc_data.get("medium") or ohlc_data.get("higher")
+        lower_tf = ohlc_data.get("lower")
+        if lower_tf is None:
+            lower_tf = ohlc_data.get("medium")
+        if lower_tf is None:
+            lower_tf = ohlc_data.get("higher")
         if lower_tf is None or len(lower_tf) == 0:
             return
         current_price = float(lower_tf["close"].iloc[-1])
