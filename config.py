@@ -13,7 +13,7 @@ load_dotenv()
 # ============================================================
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "YOUR_BINANCE_API_KEY_HERE")
 BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "YOUR_BINANCE_API_SECRET_HERE")
-BINANCE_TESTNET = False  # True for testnet, False for real account
+BINANCE_TESTNET = True  # True for testnet, False for real account
 
 # ============================================================
 # TRADING PARAMETERS
