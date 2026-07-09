@@ -696,7 +696,7 @@ class HackerAIBot:
         return 0.02
 
     def _round_quantity(self, symbol: str, quantity: float) -> float:
-        """Round quantity to exchange step size"""
+        """Round quantity to exchange step size, and clamp to the symbol's min/max quantity."""
         try:
             info = self._get_exchange_info()
             for s in info.get("symbols", []):
@@ -708,14 +708,20 @@ class HackerAIBot:
                     # than "LOT_SIZE". Prefer MARKET_LOT_SIZE; fall back to
                     # LOT_SIZE if absent.
                     step_size_str = None
+                    min_qty_str = None
+                    max_qty_str = None
                     for f in s.get("filters", []):
                         if f["filterType"] == "MARKET_LOT_SIZE":
                             step_size_str = f["stepSize"]
+                            min_qty_str = f.get("minQty")
+                            max_qty_str = f.get("maxQty")
                             break
                     if step_size_str is None:
                         for f in s.get("filters", []):
                             if f["filterType"] == "LOT_SIZE":
                                 step_size_str = f["stepSize"]
+                                min_qty_str = f.get("minQty")
+                                max_qty_str = f.get("maxQty")
                                 break
                     if step_size_str and float(step_size_str) > 0:
                         # FIX (real bug): Decimal.quantize() rounds to match
@@ -734,6 +740,33 @@ class HackerAIBot:
                         rounded = float(Decimal(str(quantity)).quantize(
                             step, rounding=ROUND_DOWN
                         ))
+                        # FIX (error -4005 "Quantity greater than max
+                        # quantity"): the bot sized every order purely from
+                        # margin x leverage and never checked the result
+                        # against the exchange's own per-symbol maxQty
+                        # (MARKET_LOT_SIZE/LOT_SIZE). Coins with a low max
+                        # order size (e.g. KAITOUSDT) could get a computed
+                        # quantity above that cap, which Binance rejects
+                        # outright. Clamp into [minQty, maxQty] here so the
+                        # order always sent is one Binance will accept.
+                        if max_qty_str:
+                            max_qty = float(max_qty_str)
+                            if max_qty > 0 and rounded > max_qty:
+                                logger.warning(
+                                    f"⚠️ {symbol}: qty {rounded!r} exceeds exchange max "
+                                    f"quantity {max_qty!r}, capping to max instead."
+                                )
+                                rounded = float(Decimal(str(max_qty)).quantize(
+                                    step, rounding=ROUND_DOWN
+                                ))
+                        if min_qty_str:
+                            min_qty = float(min_qty_str)
+                            if min_qty > 0 and 0 < rounded < min_qty:
+                                logger.warning(
+                                    f"⚠️ {symbol}: qty {rounded!r} is below exchange min "
+                                    f"quantity {min_qty!r}, skipping this trade."
+                                )
+                                return 0.0
                         logger.debug(f"🔧 {symbol}: qty {quantity!r} -> step "
                                      f"{step_size_str!r} -> rounded {rounded!r}")
                         return rounded
