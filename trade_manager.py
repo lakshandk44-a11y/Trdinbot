@@ -315,6 +315,22 @@ class TradeManager:
         """
         Move the resting exchange STOP_MARKET order when the bot's trailing
         stop advances. Throttled to avoid cancel/replace on every tiny tick.
+
+        FIX (protection gap on error -2021 "Order would immediately
+        trigger"): this used to CANCEL the old resting stop order first,
+        then place the new one. If price moved fast between those two
+        calls, the new order could arrive at a stop price already on the
+        wrong side of the current market price, and Binance rejects it
+        with -2021 — leaving the position with NO exchange-side stop at
+        all until the next successful trailing update (software-side
+        polling was still watching it, but the whole point of the
+        exchange-side order is to protect the position even if the bot/VPS
+        goes down). Placing the new order FIRST and only cancelling the
+        old one after that succeeds removes that gap: worst case there are
+        briefly two resting reduceOnly stop orders (harmless — filling one
+        flattens the position, so the other simply has nothing left to
+        reduce), and if the new order is rejected the original order is
+        left in place instead of being torn down for nothing.
         """
         # FIX (Price precision bug): round the new trailing SL to the
         # symbol's tick size before storing/sending it.
@@ -335,23 +351,26 @@ class TradeManager:
         position_side = trade.get("position_side") if self.hedge_mode else None
 
         try:
-            if old_order_id:
-                self.client.cancel_order(symbol=symbol, orderId=old_order_id)
-        except Exception as e:
-            logger.debug(f"Could not cancel old SL order for {symbol} (may already be gone): {e}")
-
-        try:
             new_order = self.client.new_stop_order(
                 symbol=symbol, side=close_side, stop_price=new_sl_price,
                 quantity=trade["quantity"], order_type="STOP_MARKET",
                 positionSide=position_side
             )
-            trade["sl_order_id"] = new_order.get("orderId")
-            trade["_last_exchange_sl"] = new_sl_price
-            logger.info(f"🔺 Exchange trailing stop moved: {symbol} @ {new_sl_price:.8f}")
         except Exception as e:
             logger.error(f"⚠️ Could not move exchange stop for {symbol}: {e}. "
-                         f"Software-side monitor still has the updated level.")
+                         f"Leaving the existing exchange order in place (not cancelled) — "
+                         f"software-side monitor still has the updated level.")
+            return
+
+        trade["sl_order_id"] = new_order.get("orderId")
+        trade["_last_exchange_sl"] = new_sl_price
+        logger.info(f"🔺 Exchange trailing stop moved: {symbol} @ {new_sl_price:.8f}")
+
+        try:
+            if old_order_id:
+                self.client.cancel_order(symbol=symbol, orderId=old_order_id)
+        except Exception as e:
+            logger.debug(f"Could not cancel old SL order for {symbol} (may already be gone): {e}")
     
     def _monitor_loop(self):
         """Monitor all trades every 5 seconds"""
