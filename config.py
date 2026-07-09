@@ -26,7 +26,7 @@ RISK_PER_TRADE = 0.02  # 2% risk per trade (for position sizing)
 # SIGNAL REQUIREMENTS (à¶”à¶¶à·š à¶…à¶½à·”à¶­à·Š conditions)
 # ============================================================
 MIN_TOOLS_MATCH = 3  # Tools 5à¶±à·Š à¶…à·€à¶¸ à¶œà·à¶½à¶´à·™à¶± à¶œà¶«à¶± (5/3 rule)
-MIN_PROFIT_CHANCE = 45.0  # à¶…à·€à¶¸ profit chance à¶‘à¶š 65%
+MIN_PROFIT_CHANCE = 60.0  # à¶…à·€à¶¸ profit chance à¶‘à¶š 65%
 SCAN_INTERVAL_SECONDS = 30  # à·ƒà·‘à¶¸ à¶­à¶­à·Š 30à¶šà¶§ à·€à¶»à¶šà·Š scan (24/7)
 BALANCE_CHECK_INTERVAL = 60  # Balance check interval seconds
 WAIT_FOR_BALANCE = True  # Balance à¶±à·à¶­à·’ à·€à·™à¶½à·à·€à¶§ crash à¶±à·œà·€à·“ wait à¶šà¶»à¶±à·Šà¶±
