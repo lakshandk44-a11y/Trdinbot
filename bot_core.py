@@ -11,7 +11,7 @@ import hmac
 import requests
 import json
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 import pandas as pd
 import numpy as np
 from decimal import Decimal, ROUND_DOWN
@@ -307,7 +307,7 @@ class HackerAIBot:
         self._exchange_info_cache_time = 0.0
         self._exchange_info_ttl = 3600  # seconds
 
-        logger.info("🤖 Mr.DKxx Bot initialized (24/7 Mode)")
+        logger.info("🤖 HackerAI Bot initialized (24/7 Mode)")
 
     def start(self):
         """Start the bot"""
@@ -317,7 +317,7 @@ class HackerAIBot:
 
         self.running = True
         self.paused = False
-        logger.info("🚀 Mr.DKxx Bot STARTING in 24/7 mode...")
+        logger.info("🚀 HackerAI Bot STARTING in 24/7 mode...")
 
         # FIX (Persistence Bug): cross-check any trades restored from disk
         # against what's actually open on Binance right now, in case
@@ -472,7 +472,7 @@ class HackerAIBot:
                     min_chance = self.config.get("MIN_PROFIT_CHANCE", 65.0)
 
                     if tools_agreeing >= min_tools and profit_chance >= min_chance:
-                        self._execute_trade(symbol, decision, final, ohlc_data)
+                        self._execute_trade(symbol, decision, final, ohlc_data, analysis)
 
             except Exception as e:
                 logger.error(f"Error scanning {symbol}: {e}")
@@ -510,7 +510,88 @@ class HackerAIBot:
             return None
         return result
 
-    def _execute_trade(self, symbol: str, decision: str, signal: Dict, ohlc_data: Dict):
+    def _get_analysis_based_tp_sl(self, symbol: str, side: str, entry_price: float,
+                                   analysis: Dict) -> Tuple[Optional[float], Optional[float]]:
+        """
+        Derive TP/SL from the same analysis tools that triggered the trade,
+        instead of a flat fixed percentage for every coin.
+
+        For a BUY: TP targets the nearest detected resistance ABOVE entry
+        (a bearish order block, a bearish FVG's near edge, or an untapped
+        buyside liquidity pool); SL targets the nearest detected support
+        BELOW entry (mirror image, bullish versions). For a SELL it's the
+        reverse. This uses the same order block / FVG / liquidity data the
+        5 tools already compute — no new indicators are introduced.
+
+        Every candidate is checked to be strictly on the correct side of
+        entry_price (a "resistance" behind current price is useless), and
+        the final distance is clamped to [0.5x, 3x] of the configured
+        TAKE_PROFIT_PERCENT/STOP_LOSS_PERCENT. This keeps the target
+        realistic — close enough that the trade can plausibly reach it
+        before conditions change, never so tight it behaves like noise,
+        and never so far it stops being a sane risk/reward for this
+        strategy. Returns (None, None) if no timeframe has a usable level,
+        so the caller can fall back to the existing fixed-percent behavior
+        exactly as before.
+        """
+        tp_percent = self.config.get("TAKE_PROFIT_PERCENT", 2.0) / 100
+        sl_percent = self.config.get("STOP_LOSS_PERCENT", 1.0) / 100
+        min_mult, max_mult = 0.5, 3.0
+
+        def clamp(level: float, base_percent: float, is_tp: bool) -> float:
+            distance = abs(level - entry_price)
+            min_dist = entry_price * base_percent * min_mult
+            max_dist = entry_price * base_percent * max_mult
+            distance = max(min_dist, min(distance, max_dist))
+            if (side == "BUY" and is_tp) or (side == "SELL" and not is_tp):
+                return entry_price + distance
+            return entry_price - distance
+
+        resistance_candidates = []
+        support_candidates = []
+
+        for tf_name in ["higher", "medium"]:
+            tf = analysis.get(tf_name)
+            if not tf:
+                continue
+
+            ob = tf.get("order_block", {})
+            bear_ob = ob.get("bearish_ob")
+            if bear_ob and bear_ob.get("level"):
+                resistance_candidates.append(bear_ob["level"])
+            bull_ob = ob.get("bullish_ob")
+            if bull_ob and bull_ob.get("level"):
+                support_candidates.append(bull_ob["level"])
+
+            for fvg in tf.get("fvg", {}).get("fvg_levels", []):
+                if fvg.get("type") == "bearish" and fvg.get("low"):
+                    resistance_candidates.append(fvg["low"])
+                elif fvg.get("type") == "bullish" and fvg.get("high"):
+                    support_candidates.append(fvg["high"])
+
+            liq = tf.get("liquidity", {})
+            if liq.get("buyside_liquidity"):
+                resistance_candidates.append(liq["buyside_liquidity"])
+            if liq.get("sellside_liquidity"):
+                support_candidates.append(liq["sellside_liquidity"])
+
+        if side == "BUY":
+            tp_pool = [lvl for lvl in resistance_candidates if lvl > entry_price]
+            sl_pool = [lvl for lvl in support_candidates if lvl < entry_price]
+            tp_level = min(tp_pool) if tp_pool else None   # nearest resistance above
+            sl_level = max(sl_pool) if sl_pool else None   # nearest support below
+        else:
+            tp_pool = [lvl for lvl in support_candidates if lvl < entry_price]
+            sl_pool = [lvl for lvl in resistance_candidates if lvl > entry_price]
+            tp_level = max(tp_pool) if tp_pool else None   # nearest support below
+            sl_level = min(sl_pool) if sl_pool else None   # nearest resistance above
+
+        final_tp = clamp(tp_level, tp_percent, is_tp=True) if tp_level is not None else None
+        final_sl = clamp(sl_level, sl_percent, is_tp=False) if sl_level is not None else None
+        return final_tp, final_sl
+
+    def _execute_trade(self, symbol: str, decision: str, signal: Dict, ohlc_data: Dict,
+                        analysis: Optional[Dict] = None):
         """
         Execute trade on Binance Futures
         Auto coin min notional, max leverage, and balance check
@@ -597,8 +678,21 @@ class HackerAIBot:
             logger.warning(f"Leverage change warning for {symbol}: {e}")
 
         # Calculate position size
+        # FIX (analysis-based TP/SL): derive the stop/target from the same
+        # order block / FVG / liquidity levels the tools detected, instead
+        # of always using a flat fixed percentage. Falls back to the
+        # original fixed-percent SL/TP untouched if no timeframe has a
+        # usable level for this trade.
         sl_percent = self.config.get("STOP_LOSS_PERCENT", 1.0) / 100.0
-        if decision == "BUY":
+        dynamic_tp, dynamic_sl = (None, None)
+        if analysis:
+            dynamic_tp, dynamic_sl = self._get_analysis_based_tp_sl(
+                symbol, decision, current_price, analysis
+            )
+
+        if dynamic_sl is not None:
+            sl_price = dynamic_sl
+        elif decision == "BUY":
             sl_price = current_price * (1 - sl_percent)
         else:
             sl_price = current_price * (1 + sl_percent)
@@ -649,7 +743,9 @@ class HackerAIBot:
                     "margin_used": margin,
                     "position_value": final_position,
                     "min_notional": coin_min_notional,
-                }
+                },
+                dynamic_tp=dynamic_tp,
+                dynamic_sl=dynamic_sl
             )
             if trade:
                 trade["binance_order_id"] = order.get("orderId")
