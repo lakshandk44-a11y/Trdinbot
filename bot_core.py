@@ -791,11 +791,33 @@ class HackerAIBot:
                 logger.debug(f"Price update error for {symbol}: {e}")
 
     def _check_trade_reversals(self):
-        """Check if open trades should close due to reversal"""
+        """
+        Check if open trades should close due to reversal.
+
+        FIX (whipsaw protection): a trade used to become eligible for
+        REVERSAL_SIGNAL close on the very next 30s scan after opening —
+        the same min_tools=3 bar used for entry. Brief noise right after
+        entry could flip that bar the other way for one scan and get the
+        trade closed seconds later, even if price would have gone back in
+        the original direction moments after. This does NOT touch
+        STOP_LOSS or TAKE_PROFIT in any way — those still trigger exactly
+        as before, at any moment, including during this window. It only
+        holds off the *reversal-based* manual close until the trade has
+        been open for REVERSAL_COOLDOWN_SECONDS, so a fresh trade gets a
+        short grace period to ride out momentary noise before a reversal
+        signal is allowed to close it.
+        """
         open_trades = self.trade_manager.get_open_trades()
         min_tools = self.config.get("MIN_TOOLS_MATCH", 3)
+        cooldown_seconds = self.config.get("REVERSAL_COOLDOWN_SECONDS", 240)
 
         for symbol, trade in open_trades.items():
+            entry_time = trade.get("entry_time")
+            if entry_time:
+                age_seconds = (datetime.now() - entry_time).total_seconds()
+                if age_seconds < cooldown_seconds:
+                    continue  # still in grace period — SL/TP remain fully active regardless
+
             cached = self.analysis_cache.get(symbol)
             if not cached:
                 continue
