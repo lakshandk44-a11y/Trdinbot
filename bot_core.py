@@ -307,7 +307,7 @@ class HackerAIBot:
         self._exchange_info_cache_time = 0.0
         self._exchange_info_ttl = 3600  # seconds
 
-        logger.info("🤖 HackerAI Bot initialized (24/7 Mode)")
+        logger.info("🤖 Mr.DKxx Bot initialized (24/7 Mode)")
 
     def start(self):
         """Start the bot"""
@@ -317,7 +317,7 @@ class HackerAIBot:
 
         self.running = True
         self.paused = False
-        logger.info("🚀 HackerAI Bot STARTING in 24/7 mode...")
+        logger.info("🚀 Mr.DKxx Bot STARTING in 24/7 mode...")
 
         # FIX (Persistence Bug): cross-check any trades restored from disk
         # against what's actually open on Binance right now, in case
