@@ -410,7 +410,9 @@ class TradeManager:
     
     def open_new_trade(self, symbol: str, side: str, entry_price: float, 
                        quantity: float, leverage: int, 
-                       analysis_result: Dict) -> Optional[Dict]:
+                       analysis_result: Dict,
+                       dynamic_tp: Optional[float] = None,
+                       dynamic_sl: Optional[float] = None) -> Optional[Dict]:
         """Open a new trade"""
         with self.lock:
             if len(self.open_trades) >= self.config.get("MAX_OPEN_TRADES", 15):
@@ -423,13 +425,21 @@ class TradeManager:
         
         tp_percent = self.config.get("TAKE_PROFIT_PERCENT", 2.0) / 100
         sl_percent = self.config.get("STOP_LOSS_PERCENT", 1.0) / 100
-        
+
+        # FIX (analysis-based TP/SL): use the levels the caller derived from
+        # this trade's own order block / FVG / liquidity analysis, when
+        # available and sane (on the correct side of entry). Otherwise fall
+        # back to the original flat-percentage calculation, unchanged.
         if side.upper() == "BUY":
-            take_profit = entry_price * (1 + tp_percent)
-            stop_loss = entry_price * (1 - sl_percent)
+            take_profit = dynamic_tp if (dynamic_tp is not None and dynamic_tp > entry_price) \
+                else entry_price * (1 + tp_percent)
+            stop_loss = dynamic_sl if (dynamic_sl is not None and dynamic_sl < entry_price) \
+                else entry_price * (1 - sl_percent)
         else:
-            take_profit = entry_price * (1 - tp_percent)
-            stop_loss = entry_price * (1 + sl_percent)
+            take_profit = dynamic_tp if (dynamic_tp is not None and dynamic_tp < entry_price) \
+                else entry_price * (1 - tp_percent)
+            stop_loss = dynamic_sl if (dynamic_sl is not None and dynamic_sl > entry_price) \
+                else entry_price * (1 + sl_percent)
 
         # FIX (Price precision bug): round to the symbol's tick size right
         # away so the stored SL/TP always matches what's actually sent to
