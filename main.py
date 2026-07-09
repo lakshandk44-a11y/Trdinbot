@@ -59,7 +59,7 @@ def print_banner():
     """Print bot banner"""
     banner = """
 ╔══════════════════════════════════════════════════════════╗
-║              🤖 HACKERAI BOT v2.0 🤖                     ║
+║              🤖 Mr.DKxx BOT v2.0 🤖                     ║
 ║           Auto Trading Bot - Binance Futures             ║
 ║                                                          ║
 ║  🕐 24/7 Operation  |  🖥️  EC2/PM2 Deploy               ║
@@ -128,7 +128,7 @@ def main():
     logger = setup_logging()
     
     logger.info("=" * 50)
-    logger.info(f"🚀 HackerAI Bot v2.0 Starting at {datetime.now().isoformat()}")
+    logger.info(f"🚀 Mr.DKxx Bot v2.0 Starting at {datetime.now().isoformat()}")
     logger.info(f"📈 Balance Allocation: {BALANCE_PERCENTAGE}%")
     logger.info(f"⚙️ Max Leverage: {MAX_LEVERAGE}x")
     logger.info(f"📊 Timeframes: {TIMEFRAMES}")
