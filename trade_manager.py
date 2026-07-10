@@ -423,7 +423,20 @@ class TradeManager:
     
     def calculate_position_size(self, balance: float, entry_price: float, 
                                 stop_loss_price: float, leverage: int) -> float:
-        """Calculate position size with risk management"""
+        """
+        Calculate position size with risk management.
+
+        FIX (Double-leverage sizing bug): quantity = risk_amount / price_risk
+        ALREADY gives the exact base-asset quantity that loses `risk_amount`
+        (e.g. 2% of balance) if the stop-loss is hit — leverage only affects
+        the margin required to hold that quantity, not the P&L from a given
+        price move. The old code multiplied this already-correct quantity by
+        `leverage` again, so a real SL hit lost `risk_amount * leverage`
+        instead of `risk_amount` (e.g. 50% of the trade's margin at 5x
+        leverage instead of the intended 2% of balance). Also see the caller
+        in bot_core.py, which must pass the true account balance here, not
+        an already-leveraged notional value.
+        """
         risk_percent = self.config.get("RISK_PER_TRADE", 0.02)
         risk_amount = balance * risk_percent
         
@@ -434,12 +447,7 @@ class TradeManager:
         position_value = risk_amount / (price_risk / entry_price)
         quantity = position_value / entry_price
         
-        max_leverage = self.config.get("MAX_LEVERAGE", leverage)
-        leverage = min(leverage, max_leverage)
-        
-        quantity_with_leverage = quantity * leverage
-        
-        return quantity_with_leverage
+        return quantity
     
     def open_new_trade(self, symbol: str, side: str, entry_price: float, 
                        quantity: float, leverage: int, 
