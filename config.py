@@ -91,8 +91,8 @@ ENABLE_DISCORD = True
 # ============================================================
 # TRADE MANAGEMENT
 # ============================================================
-TAKE_PROFIT_PERCENT = 2.0      # 2% take profit
-STOP_LOSS_PERCENT = 1.0        # 1% stop loss
+TAKE_PROFIT_PERCENT = 5.0      # 5% take profit (also the clamp-range base for analysis-based TP)
+STOP_LOSS_PERCENT = 3.0        # 3% stop loss (also the clamp-range base for analysis-based SL)
 TRAILING_STOP_ACTIVATE = 0.5   # Activate trailing at 0.5% profit
 TRAILING_STOP_DISTANCE = 0.3   # Trailing stop distance 0.3%
 MAX_OPEN_TRADES = 15           # Maximum concurrent trades
