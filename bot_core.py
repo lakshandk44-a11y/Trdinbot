@@ -153,8 +153,13 @@ class BinanceFuturesClient:
         resp = self.session.get(f"{self.base_url}/fapi/v1/exchangeInfo")
         return resp.json()
 
-    def klines(self, symbol: str, interval: str, limit: int = 100) -> list:
+    def klines(self, symbol: str, interval: str, limit: int = 100,
+               start_time: int = None, end_time: int = None) -> list:
         params = {"symbol": symbol, "interval": interval, "limit": limit}
+        if start_time is not None:
+            params["startTime"] = start_time
+        if end_time is not None:
+            params["endTime"] = end_time
         resp = self.session.get(f"{self.base_url}/fapi/v1/klines", params=params)
         return resp.json()
 
