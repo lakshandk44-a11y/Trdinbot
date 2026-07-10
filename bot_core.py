@@ -708,8 +708,15 @@ class HackerAIBot:
         else:
             sl_price = current_price * (1 + sl_percent)
 
+        # FIX (Double-leverage sizing bug): pass the real account balance
+        # (RISK_PER_TRADE is meant as a % of account equity), not
+        # margin*leverage — that was an already-leveraged notional value
+        # being treated as "balance", which combined with the old double
+        # leverage multiplication inside calculate_position_size inflated
+        # real risk on a stop-loss hit far beyond the intended
+        # RISK_PER_TRADE percentage.
         quantity = self.trade_manager.calculate_position_size(
-            margin * final_leverage,
+            self.balance,
             current_price,
             sl_price,
             final_leverage
