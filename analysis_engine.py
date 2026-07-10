@@ -93,10 +93,14 @@ class AnalysisEngine:
         """
         Tool 1: ICT / Smart Money Concepts Analysis
 
-        FIX: the old version only checked "big candle body + makes a new
-        high/low" and called that "ICT". That is not ICT — it's just a
-        momentum-candle filter. This version implements the actual concepts
-        the bot's docstring claims to use:
+        Implements the full set of ICT/SMC concepts:
+          - Swing High / Low: validated pivot points used as structural reference levels.
+          - BOS (Break of Structure): price breaks through a prior swing high/low
+            in the direction of the existing trend, confirming continuation.
+          - CHoCH (Change of Character): price breaks through a prior swing high/low
+            AGAINST the existing trend — the first signal of a potential reversal.
+          - MSS (Market Structure Shift): a displacement candle that decisively
+            breaks structure after a CHoCH, confirming the reversal with momentum.
           - Displacement: an expansion candle/range that is significantly
             larger than the recent average range (real momentum, not just a
             big body).
@@ -111,7 +115,18 @@ class AnalysisEngine:
         """
         result = {
             "bullish": False, "bearish": False, "strength": 0,
-            "displacement": False, "pd_zone": None, "ote": False
+            "displacement": False, "pd_zone": None, "ote": False,
+            # ---- New fields ----
+            "swing_highs": [],    # list of recent swing-high price levels
+            "swing_lows": [],     # list of recent swing-low price levels
+            "last_swing_high": None,
+            "last_swing_low": None,
+            "bos": False,         # Break of Structure occurred
+            "bos_direction": None,  # "bullish" | "bearish"
+            "choch": False,       # Change of Character occurred
+            "choch_direction": None,  # "bullish" | "bearish"
+            "mss": False,         # Market Structure Shift confirmed
+            "mss_direction": None,  # "bullish" | "bearish"
         }
 
         if len(ohlc) < 50:
@@ -123,31 +138,146 @@ class AnalysisEngine:
         open_p = ohlc["open"].values
         volume = ohlc["volume"].values if "volume" in ohlc.columns else None
 
-        # ---- Displacement: current range meaningfully bigger than recent average ----
+        # ================================================================
+        # 1. SWING HIGH / LOW DETECTION
+        #    A swing high: candle[i].high is the highest of (i-2,i-1,i,i+1,i+2).
+        #    A swing low:  candle[i].low  is the lowest  of (i-2,i-1,i,i+1,i+2).
+        #    We scan the last 60 candles (excluding the live/forming candle).
+        # ================================================================
+        lookback = min(60, len(ohlc) - 1)  # leave -1 for the live candle
+        pivot_n = 2                          # bars on each side required
+
+        swing_high_levels = []
+        swing_low_levels = []
+
+        for i in range(pivot_n, lookback - pivot_n):
+            idx = -(lookback - i)            # negative index into the array
+
+            # Swing High: idx.high strictly greater than surrounding bars
+            is_sh = all(
+                high[idx] > high[idx - k] for k in range(1, pivot_n + 1)
+            ) and all(
+                high[idx] > high[idx + k] for k in range(1, pivot_n + 1)
+            )
+            if is_sh:
+                swing_high_levels.append(float(high[idx]))
+
+            # Swing Low: idx.low strictly less than surrounding bars
+            is_sl = all(
+                low[idx] < low[idx - k] for k in range(1, pivot_n + 1)
+            ) and all(
+                low[idx] < low[idx + k] for k in range(1, pivot_n + 1)
+            )
+            if is_sl:
+                swing_low_levels.append(float(low[idx]))
+
+        result["swing_highs"] = swing_high_levels
+        result["swing_lows"] = swing_low_levels
+        result["last_swing_high"] = swing_high_levels[-1] if swing_high_levels else None
+        result["last_swing_low"] = swing_low_levels[-1] if swing_low_levels else None
+
+        # ================================================================
+        # 2. TREND CONTEXT (needed to distinguish BOS vs CHoCH)
+        #    Simple: compare average of recent 10 closes vs recent 30 closes.
+        # ================================================================
+        ema_short = np.mean(close[-10:])
+        ema_long = np.mean(close[-30:]) if len(close) >= 30 else np.mean(close)
+        trend_bullish = ema_short > ema_long * 1.003
+        trend_bearish = ema_short < ema_long * 0.997
+
+        # ================================================================
+        # 3. BOS — Break of Structure
+        #    Bullish BOS: close breaks above a prior swing high IN a bullish trend.
+        #    Bearish BOS: close breaks below a prior swing low IN a bearish trend.
+        # ================================================================
+        if swing_high_levels and trend_bullish:
+            # Use the most recent swing high as the reference level
+            ref_sh = swing_high_levels[-1]
+            if close[-1] > ref_sh:
+                result["bos"] = True
+                result["bos_direction"] = "bullish"
+                result["bullish"] = True
+                result["strength"] += 2
+
+        if swing_low_levels and trend_bearish and not result["bos"]:
+            ref_sl = swing_low_levels[-1]
+            if close[-1] < ref_sl:
+                result["bos"] = True
+                result["bos_direction"] = "bearish"
+                result["bearish"] = True
+                result["strength"] -= 2
+
+        # ================================================================
+        # 4. CHoCH — Change of Character
+        #    Bullish CHoCH: price breaks above a swing high while trend is bearish
+        #                   (counter-trend break → potential reversal to bullish).
+        #    Bearish CHoCH: price breaks below a swing low while trend is bullish
+        #                   (counter-trend break → potential reversal to bearish).
+        # ================================================================
+        if swing_high_levels and trend_bearish:
+            ref_sh = swing_high_levels[-1]
+            if close[-1] > ref_sh:
+                result["choch"] = True
+                result["choch_direction"] = "bullish"
+                result["bullish"] = True
+                result["strength"] += 2
+
+        if swing_low_levels and trend_bullish and not result["choch"]:
+            ref_sl = swing_low_levels[-1]
+            if close[-1] < ref_sl:
+                result["choch"] = True
+                result["choch_direction"] = "bearish"
+                result["bearish"] = True
+                result["strength"] -= 2
+
+        # ================================================================
+        # 5. MSS — Market Structure Shift
+        #    Confirmation of CHoCH: a displacement candle (strong body, above-
+        #    average range) occurs immediately after the CHoCH signal and closes
+        #    clearly beyond the broken structural level.  This is the "shift"
+        #    that separates a genuine reversal from a fake-out.
+        # ================================================================
         recent_ranges = high[-31:-1] - low[-31:-1]
         avg_range = np.mean(recent_ranges) if len(recent_ranges) > 0 else 0.0
         last_range = high[-1] - low[-1]
         last_body = abs(close[-1] - open_p[-1])
-        displacement = bool(
-            avg_range > 0 and last_range > avg_range * 1.5 and last_body > last_range * 0.6
+        is_displacement_candle = bool(
+            avg_range > 0
+            and last_range > avg_range * 1.5
+            and last_body > last_range * 0.6
         )
-        result["displacement"] = displacement
 
-        # ---- Premium / Discount array: where is price within its recent swing range ----
-        swing_high = np.max(high[-40:])
-        swing_low = np.min(low[-40:])
-        range_size = swing_high - swing_low
+        if result["choch"] and is_displacement_candle:
+            result["mss"] = True
+            result["mss_direction"] = result["choch_direction"]
+            # MSS adds extra conviction — bump strength an additional point
+            if result["choch_direction"] == "bullish":
+                result["strength"] += 1
+            elif result["choch_direction"] == "bearish":
+                result["strength"] -= 1
+
+        # ================================================================
+        # 6. DISPLACEMENT (standalone — already used above for MSS check)
+        # ================================================================
+        result["displacement"] = is_displacement_candle
+
+        # ================================================================
+        # 7. PREMIUM / DISCOUNT ARRAY
+        # ================================================================
+        swing_high_pd = np.max(high[-40:])
+        swing_low_pd = np.min(low[-40:])
+        range_size = swing_high_pd - swing_low_pd
 
         pd_zone = None
         ote = False
         if range_size > 0:
-            position_in_range = (close[-1] - swing_low) / range_size
+            position_in_range = (close[-1] - swing_low_pd) / range_size
             pd_zone = "discount" if position_in_range <= 0.5 else "premium"
 
             # Optimal Trade Entry: retracement sitting in the classic 61.8%-79% zone,
             # measured from whichever side of the range price retraced from.
-            retracement_from_high = (swing_high - close[-1]) / range_size
-            retracement_from_low = (close[-1] - swing_low) / range_size
+            retracement_from_high = (swing_high_pd - close[-1]) / range_size
+            retracement_from_low = (close[-1] - swing_low_pd) / range_size
             if 0.618 <= retracement_from_high <= 0.79 or 0.618 <= retracement_from_low <= 0.79:
                 ote = True
 
@@ -155,10 +285,10 @@ class AnalysisEngine:
         result["ote"] = ote
 
         # ---- Directional bias: displacement aligned with PD array location ----
-        if displacement and close[-1] > open_p[-1] and pd_zone == "discount":
+        if is_displacement_candle and close[-1] > open_p[-1] and pd_zone == "discount":
             result["bullish"] = True
             result["strength"] += 2
-        elif displacement and close[-1] < open_p[-1] and pd_zone == "premium":
+        elif is_displacement_candle and close[-1] < open_p[-1] and pd_zone == "premium":
             result["bearish"] = True
             result["strength"] -= 2
 
@@ -170,10 +300,13 @@ class AnalysisEngine:
             result["bearish"] = True
             result["strength"] -= 1
 
-        # Volume-confirmed displacement (approximates inducement -> reversal displacement)
+        # ================================================================
+        # 8. VOLUME-CONFIRMED DISPLACEMENT
+        #    (approximates inducement -> reversal displacement)
+        # ================================================================
         if volume is not None and len(volume) >= 31:
             avg_vol = np.mean(volume[-31:-1])
-            if avg_vol > 0 and volume[-1] > avg_vol * 1.5 and displacement:
+            if avg_vol > 0 and volume[-1] > avg_vol * 1.5 and is_displacement_candle:
                 if close[-1] > open_p[-1]:
                     result["bullish"] = True
                     result["strength"] += 2
@@ -184,186 +317,623 @@ class AnalysisEngine:
         return result
     
     def _detect_fvg(self, ohlc: pd.DataFrame) -> Dict:
-        """Tool 2: Fair Value Gap Detection"""
-        result = {"bullish_fvg": False, "bearish_fvg": False, "fvg_levels": [], "mitigated": False}
-        
-        if len(ohlc) < 5:
+        """
+        Tool 2: Fair Value Gap (FVG) Detection
+
+        Implements the full FVG concept set:
+          - Real FVG: classic 3-candle imbalance where candle[i-1].high <
+            candle[i+1].low (bullish) or candle[i-1].low > candle[i+1].high
+            (bearish).  Only gaps larger than the ATR filter threshold are kept.
+          - ATR Filter: gaps smaller than 0.25 * ATR(14) are noise — ignored.
+            This ensures only institutionally-relevant imbalances are flagged.
+          - Mitigation: a gap is mitigated once price fully trades back into it
+            (close inside the gap zone).
+          - IFVG (Inverse FVG): a previously mitigated FVG that price later
+            reverses from.  The gap that was once support / resistance flips
+            polarity — a mitigated bullish FVG becomes a bearish IFVG level
+            (resistance), and vice versa.  This is the ICT "inversion" concept.
+        """
+        result = {
+            "bullish_fvg": False,
+            "bearish_fvg": False,
+            "fvg_levels": [],
+            "mitigated": False,
+            # ---- New fields ----
+            "ifvg_bullish": False,   # inverted (was bearish FVG, now acts as support)
+            "ifvg_bearish": False,   # inverted (was bullish FVG, now acts as resistance)
+            "ifvg_levels": [],       # list of IFVG zones with polarity
+            "atr": None,             # ATR(14) value used for filtering
+        }
+
+        if len(ohlc) < 20:
             return result
-            
-        high = ohlc["high"].values
-        low = ohlc["low"].values
+
+        high  = ohlc["high"].values
+        low   = ohlc["low"].values
         close = ohlc["close"].values
-        
-        for i in range(2, min(20, len(ohlc))):
-            if high[-i-1] < low[-i+1]:
-                gap_high = low[-i+1]
-                gap_low = high[-i-1]
-                mitigated = any(
-                    gap_low <= close[-j] <= gap_high 
-                    for j in range(i-1, min(i+5, len(ohlc)))
+
+        # ================================================================
+        # ATR(14) — used as size filter and stored for caller reference
+        # ================================================================
+        atr_period = 14
+        if len(ohlc) >= atr_period + 1:
+            tr_vals = np.maximum(
+                high[1:] - low[1:],
+                np.maximum(
+                    np.abs(high[1:] - close[:-1]),
+                    np.abs(low[1:]  - close[:-1])
                 )
-                result["bullish_fvg"] = True
-                result["fvg_levels"].append({
-                    "type": "bullish", "high": gap_high, "low": gap_low,
-                    "size": gap_high - gap_low, "mitigated": mitigated
-                })
-            elif low[-i-1] > high[-i+1]:
-                gap_high = low[-i-1]
-                gap_low = high[-i+1]
-                mitigated = any(
-                    gap_low <= close[-j] <= gap_high 
-                    for j in range(i-1, min(i+5, len(ohlc)))
-                )
-                result["bearish_fvg"] = True
-                result["fvg_levels"].append({
-                    "type": "bearish", "high": gap_high, "low": gap_low,
-                    "size": gap_high - gap_low, "mitigated": mitigated
-                })
-        
+            )
+            atr = float(np.mean(tr_vals[-atr_period:]))
+        else:
+            atr = float(np.mean(high - low))
+        result["atr"] = atr
+        min_gap_size = atr * 0.25   # gaps smaller than this are filtered out
+
+        # ================================================================
+        # REAL FVG SCAN (last 40 candles, leave live candle out)
+        # ================================================================
+        scan_end = min(40, len(ohlc) - 1)   # -1: skip the live/forming candle
+
+        for i in range(2, scan_end):
+            # --- Bullish FVG: candle[i-1].high < candle[i+1].low ---
+            # In negative indexing: candle at -(i+1), pivot -(i), candle -(i-1)
+            gap_low  = high[-(i + 1)]
+            gap_high = low[-(i - 1)]
+
+            if gap_high > gap_low:
+                gap_size = gap_high - gap_low
+                if gap_size >= min_gap_size:
+                    # Mitigation: any subsequent close inside the gap zone
+                    mitigated = any(
+                        gap_low <= close[-(j)] <= gap_high
+                        for j in range(1, i)          # candles after the gap formed
+                    )
+                    entry = {
+                        "type": "bullish",
+                        "high": float(gap_high),
+                        "low":  float(gap_low),
+                        "size": float(gap_size),
+                        "mitigated": mitigated,
+                    }
+                    result["fvg_levels"].append(entry)
+                    if not mitigated:
+                        result["bullish_fvg"] = True
+
+                    # IFVG: mitigated bullish FVG → now acts as bearish resistance
+                    if mitigated:
+                        # Confirm inversion: price must have bounced down FROM the gap
+                        # after mitigation (close below gap_low in a candle after entry)
+                        inverted = any(
+                            close[-(j)] < gap_low
+                            for j in range(1, i)
+                        )
+                        if inverted:
+                            result["ifvg_bearish"] = True
+                            result["ifvg_levels"].append({
+                                "type": "ifvg_bearish",
+                                "high": float(gap_high),
+                                "low":  float(gap_low),
+                                "size": float(gap_size),
+                            })
+
+            # --- Bearish FVG: candle[i-1].low > candle[i+1].high ---
+            gap_high2 = low[-(i + 1)]
+            gap_low2  = high[-(i - 1)]
+
+            if gap_high2 > gap_low2:
+                gap_size2 = gap_high2 - gap_low2
+                if gap_size2 >= min_gap_size:
+                    mitigated2 = any(
+                        gap_low2 <= close[-(j)] <= gap_high2
+                        for j in range(1, i)
+                    )
+                    entry2 = {
+                        "type": "bearish",
+                        "high": float(gap_high2),
+                        "low":  float(gap_low2),
+                        "size": float(gap_size2),
+                        "mitigated": mitigated2,
+                    }
+                    result["fvg_levels"].append(entry2)
+                    if not mitigated2:
+                        result["bearish_fvg"] = True
+
+                    # IFVG: mitigated bearish FVG → now acts as bullish support
+                    if mitigated2:
+                        inverted2 = any(
+                            close[-(j)] > gap_high2
+                            for j in range(1, i)
+                        )
+                        if inverted2:
+                            result["ifvg_bullish"] = True
+                            result["ifvg_levels"].append({
+                                "type": "ifvg_bullish",
+                                "high": float(gap_high2),
+                                "low":  float(gap_low2),
+                                "size": float(gap_size2),
+                            })
+
+        # Overall mitigated flag: True only if ALL found gaps are mitigated
         if result["fvg_levels"]:
-            result["mitigated"] = any(f["mitigated"] for f in result["fvg_levels"])
-        
+            result["mitigated"] = all(f["mitigated"] for f in result["fvg_levels"])
+
         return result
     
     def _detect_order_blocks(self, ohlc: pd.DataFrame) -> Dict:
-        """Tool 3: Order Block Detection"""
-        result = {"bullish_ob": None, "bearish_ob": None, "ob_levels": []}
-        
+        """
+        Tool 3: Order Block Detection
+
+        Implements the full OB concept set:
+          - Bullish OB: the last bearish candle before a significant bullish
+            impulse move. Price is expected to return to this zone as support.
+          - Bearish OB: the last bullish candle before a significant bearish
+            impulse move. Price is expected to return to this zone as resistance.
+          - Breaker Block: an OB that price has fully traded through (violating
+            it as support/resistance). Once broken, it FLIPS polarity —
+            a bullish OB that gets broken becomes bearish resistance (bearish
+            breaker), and vice versa. Breaker blocks are high-probability
+            re-entry zones.
+          - Retest: price has returned to touch an unmitigated OB zone after
+            the initial move away from it. A retest of a valid OB is the
+            preferred entry trigger in ICT methodology.
+        """
+        result = {
+            "bullish_ob": None,
+            "bearish_ob": None,
+            "ob_levels": [],
+            # ---- New fields ----
+            "breaker_bullish": None,   # bearish OB that got broken -> now support
+            "breaker_bearish": None,   # bullish OB that got broken -> now resistance
+            "breaker_levels": [],
+            "retest_bullish": False,   # price is currently retesting a bullish OB
+            "retest_bearish": False,   # price is currently retesting a bearish OB
+        }
+
         if len(ohlc) < 10:
             return result
-            
+
         open_p = ohlc["open"].values
-        close = ohlc["close"].values
-        high = ohlc["high"].values
-        low = ohlc["low"].values
-        
-        for i in range(3, min(30, len(ohlc))):
-            current_body = abs(close[-i] - open_p[-i])
-            current_range = high[-i] - low[-i]
-            if current_range == 0:
+        close  = ohlc["close"].values
+        high   = ohlc["high"].values
+        low    = ohlc["low"].values
+
+        # ================================================================
+        # STEP 1 -- Identify Order Blocks (last 40 candles)
+        # An OB is the candle BEFORE a strong impulse in the opposite direction.
+        # The impulse candle must: have a strong body ratio (>0.55), and close
+        # decisively beyond the OB candle's body.
+        # ================================================================
+        scan_range = min(40, len(ohlc) - 3)
+
+        for i in range(3, scan_range):
+            ob_idx   = -(i + 1)   # the OB candle
+            move_idx = -i          # first impulse candle after the OB
+
+            if ob_idx < -len(ohlc) or move_idx < -len(ohlc):
                 continue
-            body_ratio = current_body / current_range
-            
-            if body_ratio > 0.6 and close[-i] > open_p[-i] and \
-               close[-i] > close[-i-1] and close[-i] > close[-i-2]:
-                ob_idx = -i-1
-                if ob_idx >= -len(ohlc):
-                    ob_candle = {
-                        "type": "bullish", "high": high[ob_idx], "low": low[ob_idx],
-                        "open": open_p[ob_idx], "close": close[ob_idx],
-                        "level": (high[ob_idx] + low[ob_idx]) / 2
+
+            move_body  = abs(close[move_idx] - open_p[move_idx])
+            move_range = high[move_idx] - low[move_idx]
+            if move_range == 0:
+                continue
+            move_body_ratio = move_body / move_range
+
+            # Bullish OB: OB candle is bearish, followed by strong bullish impulse
+            if (open_p[ob_idx] > close[ob_idx]             # OB candle bearish
+                    and close[move_idx] > open_p[move_idx] # impulse bullish
+                    and move_body_ratio > 0.55              # strong body
+                    and close[move_idx] > high[ob_idx]):    # closes above OB high
+                ob_candle = {
+                    "type":  "bullish",
+                    "high":  float(high[ob_idx]),
+                    "low":   float(low[ob_idx]),
+                    "open":  float(open_p[ob_idx]),
+                    "close": float(close[ob_idx]),
+                    "level": float((high[ob_idx] + low[ob_idx]) / 2),
+                }
+                if result["bullish_ob"] is None:
+                    result["bullish_ob"] = ob_candle
+                result["ob_levels"].append(ob_candle)
+
+            # Bearish OB: OB candle is bullish, followed by strong bearish impulse
+            elif (open_p[ob_idx] < close[ob_idx]            # OB candle bullish
+                    and close[move_idx] < open_p[move_idx]  # impulse bearish
+                    and move_body_ratio > 0.55               # strong body
+                    and close[move_idx] < low[ob_idx]):      # closes below OB low
+                ob_candle = {
+                    "type":  "bearish",
+                    "high":  float(high[ob_idx]),
+                    "low":   float(low[ob_idx]),
+                    "open":  float(open_p[ob_idx]),
+                    "close": float(close[ob_idx]),
+                    "level": float((high[ob_idx] + low[ob_idx]) / 2),
+                }
+                if result["bearish_ob"] is None:
+                    result["bearish_ob"] = ob_candle
+                result["ob_levels"].append(ob_candle)
+
+        # ================================================================
+        # STEP 2 -- Breaker Block detection
+        # Bullish OB becomes Bearish Breaker if price later closes BELOW OB low.
+        # Bearish OB becomes Bullish Breaker if price later closes ABOVE OB high.
+        # Checked against the most recent 10 closes.
+        # ================================================================
+        recent_closes = close[-10:]
+
+        for ob in result["ob_levels"]:
+            if ob["type"] == "bullish":
+                broken = any(c < ob["low"] for c in recent_closes)
+                if broken:
+                    breaker = {
+                        "type":        "breaker_bearish",
+                        "origin_type": "bullish_ob",
+                        "high":        ob["high"],
+                        "low":         ob["low"],
+                        "level":       ob["level"],
                     }
-                    if result["bullish_ob"] is None:
-                        result["bullish_ob"] = ob_candle
-                    result["ob_levels"].append(ob_candle)
-                    
-            elif body_ratio > 0.6 and close[-i] < open_p[-i] and \
-                 close[-i] < close[-i-1] and close[-i] < close[-i-2]:
-                ob_idx = -i-1
-                if ob_idx >= -len(ohlc):
-                    ob_candle = {
-                        "type": "bearish", "high": high[ob_idx], "low": low[ob_idx],
-                        "open": open_p[ob_idx], "close": close[ob_idx],
-                        "level": (high[ob_idx] + low[ob_idx]) / 2
+                    if result["breaker_bearish"] is None:
+                        result["breaker_bearish"] = breaker
+                    result["breaker_levels"].append(breaker)
+
+            elif ob["type"] == "bearish":
+                broken = any(c > ob["high"] for c in recent_closes)
+                if broken:
+                    breaker = {
+                        "type":        "breaker_bullish",
+                        "origin_type": "bearish_ob",
+                        "high":        ob["high"],
+                        "low":         ob["low"],
+                        "level":       ob["level"],
                     }
-                    if result["bearish_ob"] is None:
-                        result["bearish_ob"] = ob_candle
-                    result["ob_levels"].append(ob_candle)
-        
+                    if result["breaker_bullish"] is None:
+                        result["breaker_bullish"] = breaker
+                    result["breaker_levels"].append(breaker)
+
+        # ================================================================
+        # STEP 3 -- Retest detection
+        # Price is retesting a bullish OB if the current candle's low dips into
+        # the OB zone but the close holds above OB low (touched, not broken).
+        # Mirror logic for bearish OB. Only unbroken OBs are checked.
+        # ================================================================
+        breaker_keys = {(b["high"], b["low"]) for b in result["breaker_levels"]}
+
+        for ob in result["ob_levels"]:
+            if (ob["high"], ob["low"]) in breaker_keys:
+                continue   # already a breaker -- skip
+
+            if ob["type"] == "bullish":
+                if low[-1] <= ob["high"] and close[-1] >= ob["low"]:
+                    result["retest_bullish"] = True
+
+            elif ob["type"] == "bearish":
+                if high[-1] >= ob["low"] and close[-1] <= ob["high"]:
+                    result["retest_bearish"] = True
+
         return result
-    
+
     def _detect_liquidity(self, ohlc: pd.DataFrame) -> Dict:
-        """Tool 4: Liquidity Sweeps Detection"""
-        result = {"buyside_liquidity": None, "sellside_liquidity": None, 
-                  "swept": False, "recent_sweep": None}
-        
+        """
+        Tool 4: Liquidity Detection & Sweep Analysis
+
+        Implements the full liquidity concept set:
+          - EQH / EQL (Equal Highs / Equal Lows): two or more swing highs (or
+            lows) sitting within a tight band (0.15% of price) of each other.
+            These clusters signal resting buy-side (above EQH) or sell-side
+            (below EQL) liquidity that the market is likely to hunt.
+          - Liquidity Sweep: price momentarily trades through a swing high/low
+            level but closes back on the opposite side -- the classic "stop hunt"
+            or "liquidity grab" that precedes a reversal move.
+          - External Liquidity: the major swing highs/lows of the broader recent
+            range (last 50-60 candles) -- the "obvious" levels retail traders
+            place stops at. Smart money targets these first.
+          - Internal Liquidity: shorter-term swing highs/lows within the current
+            leg (last 15-20 candles). These get swept on pullbacks / corrections
+            before the next leg in the primary direction continues.
+        """
+        result = {
+            "buyside_liquidity":  None,
+            "sellside_liquidity": None,
+            "swept":              False,
+            "recent_sweep":       None,
+            # ---- New fields ----
+            "eqh": [],                   # Equal High levels (buy-side liquidity pools)
+            "eql": [],                   # Equal Low levels  (sell-side liquidity pools)
+            "eqh_detected": False,
+            "eql_detected": False,
+            "external_liquidity_high": None,  # major swing high (external)
+            "external_liquidity_low":  None,  # major swing low  (external)
+            "internal_liquidity_high": None,  # recent leg swing high (internal)
+            "internal_liquidity_low":  None,  # recent leg swing low  (internal)
+            "internal_swept": False,     # internal level got swept
+            "external_swept": False,     # external level got swept
+        }
+
         if len(ohlc) < 30:
             return result
-            
-        high = ohlc["high"].values
-        low = ohlc["low"].values
-        close = ohlc["close"].values
-        
-        swing_highs = []
-        swing_lows = []
-        
-        for i in range(5, min(30, len(ohlc) - 5)):
-            if all(high[-i] > high[-i-j] for j in range(1, 4)) and \
-               all(high[-i] > high[-i+j] for j in range(1, 4)):
-                swing_highs.append({"index": len(ohlc) - i, "level": high[-i]})
-            if all(low[-i] < low[-i-j] for j in range(1, 4)) and \
-               all(low[-i] < low[-i+j] for j in range(1, 4)):
-                swing_lows.append({"index": len(ohlc) - i, "level": low[-i]})
-        
-        # FIX (Crash Bug): filter first, then only call max()/min() with an
-        # explicit key on non-empty lists. The old code did
-        # max(sh for sh in swing_highs if ...) with no key, which raises
-        # ValueError on an empty generator and can also fail comparing dicts
-        # directly when there is more than one candidate.
-        candidate_highs = [sh for sh in swing_highs if sh["level"] > close[-1] * 0.99]
-        if candidate_highs:
-            nearest_sh = max(candidate_highs, key=lambda x: x["level"])
-            if high[-1] >= nearest_sh["level"]:
-                result["buyside_liquidity"] = nearest_sh["level"]
-                result["swept"] = True
-                result["recent_sweep"] = "buyside"
 
-        candidate_lows = [sl for sl in swing_lows if sl["level"] < close[-1] * 1.01]
-        if candidate_lows:
-            nearest_sl = min(candidate_lows, key=lambda x: x["level"])
-            if low[-1] <= nearest_sl["level"]:
-                result["sellside_liquidity"] = nearest_sl["level"]
-                result["swept"] = True
-                result["recent_sweep"] = "sellside"
-        
+        high  = ohlc["high"].values
+        low   = ohlc["low"].values
+        close = ohlc["close"].values
+
+        # ================================================================
+        # STEP 1 -- Detect swing highs & lows (3-bar pivot, last 60 candles)
+        # ================================================================
+        ext_lookback = min(60, len(ohlc) - 1)
+        int_lookback = min(20, len(ohlc) - 1)
+        pivot_n = 3
+
+        ext_swing_highs = []
+        ext_swing_lows  = []
+
+        for i in range(pivot_n, ext_lookback - pivot_n):
+            idx = -(ext_lookback - i)
+            is_sh = (all(high[idx] > high[idx - k] for k in range(1, pivot_n + 1))
+                     and all(high[idx] > high[idx + k] for k in range(1, pivot_n + 1)))
+            if is_sh:
+                ext_swing_highs.append(float(high[idx]))
+
+            is_sl = (all(low[idx] < low[idx - k] for k in range(1, pivot_n + 1))
+                     and all(low[idx] < low[idx + k] for k in range(1, pivot_n + 1)))
+            if is_sl:
+                ext_swing_lows.append(float(low[idx]))
+
+        # Internal: last 20 candles only (2-bar pivot)
+        int_swing_highs = []
+        int_swing_lows  = []
+        int_pivot = 2
+
+        for i in range(int_pivot, int_lookback - int_pivot):
+            idx = -(int_lookback - i)
+            is_sh = (all(high[idx] > high[idx - k] for k in range(1, int_pivot + 1))
+                     and all(high[idx] > high[idx + k] for k in range(1, int_pivot + 1)))
+            if is_sh:
+                int_swing_highs.append(float(high[idx]))
+
+            is_sl = (all(low[idx] < low[idx - k] for k in range(1, int_pivot + 1))
+                     and all(low[idx] < low[idx + k] for k in range(1, int_pivot + 1)))
+            if is_sl:
+                int_swing_lows.append(float(low[idx]))
+
+        # ================================================================
+        # STEP 2 -- EQH / EQL (Equal Highs / Equal Lows)
+        # Two swing highs within 0.15% of each other = EQH (buy-side pool).
+        # Two swing lows within 0.15% of each other  = EQL (sell-side pool).
+        # ================================================================
+        eq_tolerance = 0.0015   # 0.15%
+
+        eqh_levels = []
+        for j in range(len(ext_swing_highs)):
+            for k in range(j + 1, len(ext_swing_highs)):
+                lvl_j, lvl_k = ext_swing_highs[j], ext_swing_highs[k]
+                if lvl_j > 0 and abs(lvl_j - lvl_k) / lvl_j <= eq_tolerance:
+                    mid = (lvl_j + lvl_k) / 2
+                    if not any(abs(mid - e) / mid <= eq_tolerance for e in eqh_levels):
+                        eqh_levels.append(mid)
+
+        eql_levels = []
+        for j in range(len(ext_swing_lows)):
+            for k in range(j + 1, len(ext_swing_lows)):
+                lvl_j, lvl_k = ext_swing_lows[j], ext_swing_lows[k]
+                if lvl_j > 0 and abs(lvl_j - lvl_k) / lvl_j <= eq_tolerance:
+                    mid = (lvl_j + lvl_k) / 2
+                    if not any(abs(mid - e) / mid <= eq_tolerance for e in eql_levels):
+                        eql_levels.append(mid)
+
+        result["eqh"] = eqh_levels
+        result["eql"] = eql_levels
+        result["eqh_detected"] = len(eqh_levels) > 0
+        result["eql_detected"] = len(eql_levels) > 0
+
+        # ================================================================
+        # STEP 3 -- External Liquidity (major swing high/low of broad range)
+        # ================================================================
+        if ext_swing_highs:
+            result["external_liquidity_high"] = max(ext_swing_highs)
+        if ext_swing_lows:
+            result["external_liquidity_low"] = min(ext_swing_lows)
+
+        # ================================================================
+        # STEP 4 -- Internal Liquidity (recent leg swing high/low)
+        # ================================================================
+        if int_swing_highs:
+            result["internal_liquidity_high"] = max(int_swing_highs)
+        if int_swing_lows:
+            result["internal_liquidity_low"] = min(int_swing_lows)
+
+        # ================================================================
+        # STEP 5 -- Liquidity Sweep detection
+        # Classic sweep: high[-1] pokes above a swing high but close[-1] is
+        # back below it (stop hunt above the level, reversal follows).
+        # Mirror for sell-side.
+        # ================================================================
+        # -- External sweeps --
+        ext_h = result["external_liquidity_high"]
+        ext_l = result["external_liquidity_low"]
+
+        if ext_h is not None and high[-1] >= ext_h and close[-1] < ext_h:
+            result["buyside_liquidity"]  = ext_h
+            result["swept"]              = True
+            result["recent_sweep"]       = "buyside"
+            result["external_swept"]     = True
+
+        if ext_l is not None and low[-1] <= ext_l and close[-1] > ext_l:
+            result["sellside_liquidity"] = ext_l
+            result["swept"]              = True
+            result["recent_sweep"]       = "sellside"
+            result["external_swept"]     = True
+
+        # -- Internal sweeps (only if no external sweep already confirmed) --
+        int_h = result["internal_liquidity_high"]
+        int_l = result["internal_liquidity_low"]
+
+        if not result["swept"]:
+            if int_h is not None and high[-1] >= int_h and close[-1] < int_h:
+                result["buyside_liquidity"] = int_h
+                result["swept"]             = True
+                result["recent_sweep"]      = "buyside"
+                result["internal_swept"]    = True
+
+            if int_l is not None and low[-1] <= int_l and close[-1] > int_l:
+                result["sellside_liquidity"] = int_l
+                result["swept"]              = True
+                result["recent_sweep"]       = "sellside"
+                result["internal_swept"]     = True
+
+        # -- EQH / EQL sweeps (also count as buy/sell-side sweeps) --
+        for eqh_lvl in eqh_levels:
+            if high[-1] >= eqh_lvl and close[-1] < eqh_lvl:
+                result["buyside_liquidity"] = eqh_lvl
+                result["swept"]             = True
+                result["recent_sweep"]      = "buyside"
+                break
+
+        for eql_lvl in eql_levels:
+            if low[-1] <= eql_lvl and close[-1] > eql_lvl:
+                result["sellside_liquidity"] = eql_lvl
+                result["swept"]              = True
+                result["recent_sweep"]       = "sellside"
+                break
+
         return result
-    
+
     def _market_structure(self, ohlc: pd.DataFrame) -> Dict:
-        """Tool 5: Market Structure Analysis (BOS/CHoCH)"""
-        result = {"trend": "neutral", "bos": False, "choch": False, 
-                  "structure_broken": None, "last_bos_direction": None}
-        
+        """
+        Tool 5: Market Structure Analysis
+
+        Implements the full market structure concept set:
+          - Trend: overall directional bias derived from a swing-based higher
+            highs / higher lows (bullish) or lower highs / lower lows (bearish)
+            count over the recent 50 candles, weighted with EMA alignment.
+          - BOS (Break of Structure): close beyond a previous swing high/low
+            in the SAME direction as the trend -- confirms continuation.
+          - CHoCH (Change of Character): close beyond a previous swing high/low
+            AGAINST the trend -- early warning of a potential reversal.
+          - Confidence: a 0-100 score that combines trend clarity, BOS/CHoCH
+            quality, and how many recent swing pivots confirm the structure.
+            Exposed on the result dict so callers and the profit-chance
+            formula can use it directly.
+        """
+        result = {
+            "trend":             "neutral",
+            "bos":               False,
+            "choch":             False,
+            "structure_broken":  None,
+            "last_bos_direction": None,
+            # ---- New field ----
+            "confidence":        0.0,   # 0.0 - 1.0 structural confidence score
+        }
+
         if len(ohlc) < 20:
             return result
-            
+
         close = ohlc["close"].values
-        high = ohlc["high"].values
-        low = ohlc["low"].values
-        
+        high  = ohlc["high"].values
+        low   = ohlc["low"].values
+
+        # ================================================================
+        # STEP 1 -- Trend via swing structure (HH/HL or LH/LL count)
+        # Detect pivot highs and lows over last 50 candles (2-bar pivot).
+        # ================================================================
+        lookback  = min(50, len(ohlc) - 1)
+        pivot_n   = 2
+        p_highs   = []
+        p_lows    = []
+
+        for i in range(pivot_n, lookback - pivot_n):
+            idx = -(lookback - i)
+            if (all(high[idx] > high[idx - k] for k in range(1, pivot_n + 1))
+                    and all(high[idx] > high[idx + k] for k in range(1, pivot_n + 1))):
+                p_highs.append(float(high[idx]))
+            if (all(low[idx] < low[idx - k] for k in range(1, pivot_n + 1))
+                    and all(low[idx] < low[idx + k] for k in range(1, pivot_n + 1))):
+                p_lows.append(float(low[idx]))
+
+        # Count HH/HL vs LH/LL sequences
+        hh_count = sum(1 for j in range(1, len(p_highs)) if p_highs[j] > p_highs[j-1])
+        hl_count = sum(1 for j in range(1, len(p_lows))  if p_lows[j]  > p_lows[j-1])
+        lh_count = sum(1 for j in range(1, len(p_highs)) if p_highs[j] < p_highs[j-1])
+        ll_count = sum(1 for j in range(1, len(p_lows))  if p_lows[j]  < p_lows[j-1])
+
+        bullish_score = hh_count + hl_count
+        bearish_score = lh_count + ll_count
+
+        # EMA alignment (secondary confirmation)
         ema_short = np.mean(close[-10:])
-        ema_long = np.mean(close[-30:]) if len(close) >= 30 else np.mean(close)
-        
-        if ema_short > ema_long * 1.005:
+        ema_long  = np.mean(close[-30:]) if len(close) >= 30 else np.mean(close)
+        ema_bullish = ema_short > ema_long * 1.003
+        ema_bearish = ema_short < ema_long * 0.997
+
+        if bullish_score > bearish_score and ema_bullish:
             result["trend"] = "bullish"
-        elif ema_short < ema_long * 0.995:
+        elif bearish_score > bullish_score and ema_bearish:
             result["trend"] = "bearish"
-        
-        prev_swing_high = max(high[-15:-5]) if len(high) >= 15 else max(high)
-        if close[-1] > prev_swing_high and result["trend"] == "bullish":
-            result["bos"] = True
-            result["structure_broken"] = "bullish"
+        elif bullish_score > bearish_score:
+            result["trend"] = "bullish"   # swing structure overrides EMA if clear
+        elif bearish_score > bullish_score:
+            result["trend"] = "bearish"
+
+        # ================================================================
+        # STEP 2 -- BOS (Break of Structure)
+        # Price closes beyond the most recent swing high/low in the trend dir.
+        # ================================================================
+        ref_high = p_highs[-1] if p_highs else (max(high[-15:-5]) if len(high) >= 15 else max(high))
+        ref_low  = p_lows[-1]  if p_lows  else (min(low[-15:-5])  if len(low)  >= 15 else min(low))
+
+        if close[-1] > ref_high and result["trend"] == "bullish":
+            result["bos"]               = True
+            result["structure_broken"]  = "bullish"
             result["last_bos_direction"] = "up"
-            
-        prev_swing_low = min(low[-15:-5]) if len(low) >= 15 else min(low)
-        if close[-1] < prev_swing_low and result["trend"] == "bearish":
-            result["bos"] = True
-            result["structure_broken"] = "bearish"
+
+        if close[-1] < ref_low and result["trend"] == "bearish":
+            result["bos"]               = True
+            result["structure_broken"]  = "bearish"
             result["last_bos_direction"] = "down"
-        
-        if len(ohlc) >= 30:
-            old_highs = max(high[-20:-10])
-            old_lows = min(low[-20:-10])
-            recent_high = max(high[-5:])
-            recent_low = min(low[-5:])
-            
-            if old_lows < recent_low and recent_high < old_highs and close[-1] < close[-3]:
-                result["choch"] = True
-                result["structure_broken"] = "bearish_choch"
-            if old_highs > recent_high and recent_low > old_lows and close[-1] > close[-3]:
-                result["choch"] = True
-                result["structure_broken"] = "bullish_choch"
-        
+
+        # ================================================================
+        # STEP 3 -- CHoCH (Change of Character)
+        # Price closes against the trend beyond a swing high/low.
+        # ================================================================
+        if close[-1] > ref_high and result["trend"] == "bearish":
+            result["choch"]              = True
+            result["structure_broken"]   = "bullish_choch"
+
+        if close[-1] < ref_low and result["trend"] == "bullish":
+            result["choch"]              = True
+            result["structure_broken"]   = "bearish_choch"
+
+        # ================================================================
+        # STEP 4 -- Confidence score (0.0 - 1.0)
+        # Components:
+        #   - Swing structure clarity: ratio of dominant direction swings
+        #   - EMA alignment with swing direction
+        #   - BOS presence (+0.20) / CHoCH presence (+0.10)
+        #   - How many swing pivots were found (more = clearer structure)
+        # ================================================================
+        total_swings = bullish_score + bearish_score
+        structure_clarity = (
+            (max(bullish_score, bearish_score) / total_swings)
+            if total_swings > 0 else 0.5
+        )
+
+        ema_aligned = (
+            (ema_bullish and result["trend"] == "bullish")
+            or (ema_bearish and result["trend"] == "bearish")
+        )
+
+        pivot_coverage = min(len(p_highs) + len(p_lows), 10) / 10.0
+
+        conf = (
+            structure_clarity * 0.45
+            + (0.20 if ema_aligned else 0.0)
+            + (0.20 if result["bos"]   else 0.0)
+            + (0.10 if result["choch"] else 0.0)
+            + pivot_coverage * 0.05
+        )
+        result["confidence"] = round(min(conf, 1.0), 3)
+
         return result
+
     
     def _generate_signal(self, results: Dict) -> int:
         """Generate signal: 1=BUY, -1=SELL, 0=HOLD"""
@@ -410,7 +980,7 @@ class AnalysisEngine:
         # Tool agreement contributes up to 35 points (not enough alone to pass 65%)
         score = tool_ratio * 35
 
-        # ICT/SMC confluence: displacement + PD-array/OTE alignment, up to ~20 points
+        # ICT/SMC confluence: all Tool-1 signals, up to ~28 points
         ict = results.get("ict_smc", {})
         ict_strength = abs(ict.get("strength", 0))
         score += min(ict_strength, 5) * 4
@@ -418,23 +988,52 @@ class AnalysisEngine:
             score += 3
         if ict.get("ote"):
             score += 3
+        if ict.get("bos"):
+            score += 5   # trend continuation confirmed
+        if ict.get("choch"):
+            score += 4   # potential reversal early signal
+        if ict.get("mss"):
+            score += 6   # reversal confirmed with displacement — strongest ICT signal
+        if ict.get("last_swing_high") is not None or ict.get("last_swing_low") is not None:
+            score += 2   # structural reference points are present
 
-        # Market structure confluence
-        ms = results.get("market_structure", {})
-        if ms.get("bos"):
-            score += 10
-        if ms.get("choch"):
-            score += 6
-
-        # Unmitigated FVG = the gap is still "fresh" / untested
+        # Tool 2 -- FVG confluence (up to ~18 points)
         fvg = results.get("fvg", {})
         if (fvg.get("bullish_fvg") or fvg.get("bearish_fvg")) and not fvg.get("mitigated"):
-            score += 8
+            score += 8    # fresh, unmitigated FVG
+        if fvg.get("ifvg_bullish") or fvg.get("ifvg_bearish"):
+            score += 6    # IFVG present -- flipped gap, high-probability zone
+        if fvg.get("atr") is not None:
+            score += 4    # ATR filter was active (gaps are institutionally significant)
 
-        # Liquidity sweep confirmation (inducement -> reversal)
+        # Tool 3 -- Order Block confluence (up to ~18 points)
+        ob = results.get("order_block", {})
+        if ob.get("bullish_ob") or ob.get("bearish_ob"):
+            score += 6    # valid OB identified
+        if ob.get("retest_bullish") or ob.get("retest_bearish"):
+            score += 7    # price is actively retesting the OB -- entry zone
+        if ob.get("breaker_bullish") or ob.get("breaker_bearish"):
+            score += 5    # breaker block present -- flipped OB re-entry zone
+
+        # Tool 4 -- Liquidity confluence (up to ~18 points)
         liq = results.get("liquidity", {})
         if liq.get("swept"):
-            score += 7
+            score += 7    # any liquidity sweep (stop hunt confirmed)
+        if liq.get("external_swept"):
+            score += 4    # external (major) liquidity swept -- stronger signal
+        if liq.get("eqh_detected") or liq.get("eql_detected"):
+            score += 4    # equal highs/lows pool identified (likely target)
+        if liq.get("internal_swept") and not liq.get("external_swept"):
+            score += 3    # internal sweep only -- weaker but still valid
+
+        # Tool 5 -- Market Structure confluence (up to ~18 points)
+        ms = results.get("market_structure", {})
+        if ms.get("bos"):
+            score += 10   # BOS confirms trend continuation
+        if ms.get("choch"):
+            score += 6    # CHoCH signals early reversal
+        ms_conf = ms.get("confidence", 0.0)
+        score += ms_conf * 8   # structural confidence bonus (0-8 points)
 
         # Conflicting tools reduce confidence
         bullish_tools = results.get("bullish_tools", 0)
