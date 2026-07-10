@@ -168,35 +168,52 @@ def fetch_full_history(client: BinanceFuturesClient, symbol: str, interval: str,
             logger.warning(f"{symbol} {interval}: klines request failed at cursor={cursor}: {e}")
             break
 
-        # FIX ('backtest failed: -1' bug): when a symbol is invalid, delisted,
-        # or renamed on Binance Futures (e.g. an old TOP_40_COINS entry that
-        # no longer exists as-is), the klines endpoint returns a JSON error
-        # OBJECT like {"code": -1121, "msg": "Invalid symbol."} instead of a
-        # list of candles. That dict is truthy and iterable, so without this
-        # check it silently got extended into all_rows (as its string keys)
-        # and then `batch[-1][0]` crashed with a bare KeyError(-1) deep in
-        # the pagination loop - which surfaced up in main() as the
-        # unhelpful "{symbol}: backtest failed: -1" message. Now it's
-        # detected immediately and skipped with a clear reason instead.
-        if isinstance(batch, dict):
-            logger.warning(f"{symbol} {interval}: Binance returned an error instead of candles "
-                            f"(code={batch.get('code')}, msg={batch.get('msg')}) - symbol is "
-                            f"likely invalid/delisted/renamed on Futures. Skipping this symbol.")
+        # FIX ('backtest failed: -1' bug, round 2): the known -1121-style
+        # error dict is handled below, but ANY other unexpected response
+        # shape (a differently-shaped rate-limit body, a transient
+        # malformed payload, etc.) used to crash unguarded on
+        # `batch[-1][0]` with a bare, opaque exception (e.g. KeyError(-1))
+        # that propagated all the way up to main() as the unhelpful
+        # "{symbol}: backtest failed: -1" message - with NO clue what
+        # actually went wrong. Everything below is now wrapped so any such
+        # surprise is caught here, logged with the actual type/content of
+        # the bad response, and the symbol is skipped cleanly instead of
+        # crashing.
+        try:
+            # FIX ('backtest failed: -1' bug): when a symbol is invalid, delisted,
+            # or renamed on Binance Futures (e.g. an old TOP_40_COINS entry that
+            # no longer exists as-is), the klines endpoint returns a JSON error
+            # OBJECT like {"code": -1121, "msg": "Invalid symbol."} instead of a
+            # list of candles. That dict is truthy and iterable, so without this
+            # check it silently got extended into all_rows (as its string keys)
+            # and then `batch[-1][0]` crashed with a bare KeyError(-1) deep in
+            # the pagination loop - which surfaced up in main() as the
+            # unhelpful "{symbol}: backtest failed: -1" message. Now it's
+            # detected immediately and skipped with a clear reason instead.
+            if isinstance(batch, dict):
+                logger.warning(f"{symbol} {interval}: Binance returned an error instead of candles "
+                                f"(code={batch.get('code')}, msg={batch.get('msg')}) - symbol is "
+                                f"likely invalid/delisted/renamed on Futures. Skipping this symbol.")
+                return None
+
+            if not batch:
+                break
+
+            all_rows.extend(batch)
+
+            last_open_time = int(batch[-1][0])
+            next_cursor = last_open_time + interval_ms
+            if next_cursor <= cursor:
+                break  # exchange returned no forward progress - stop instead of looping forever
+            cursor = next_cursor
+
+            if len(batch) < 1500:
+                break  # short batch means we've caught up to "now"
+        except Exception as e:
+            logger.warning(f"{symbol} {interval}: unexpected response shape while paginating "
+                            f"(type={type(batch).__name__}, sample={str(batch)[:200]!r}) - {e!r}. "
+                            f"Skipping this symbol.")
             return None
-
-        if not batch:
-            break
-
-        all_rows.extend(batch)
-
-        last_open_time = int(batch[-1][0])
-        next_cursor = last_open_time + interval_ms
-        if next_cursor <= cursor:
-            break  # exchange returned no forward progress - stop instead of looping forever
-        cursor = next_cursor
-
-        if len(batch) < 1500:
-            break  # short batch means we've caught up to "now"
 
         time.sleep(REQUEST_PACING_SECONDS)  # be gentle with rate limits across a multi-month pull
 
