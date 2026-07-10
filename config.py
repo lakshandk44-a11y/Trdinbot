@@ -26,7 +26,17 @@ RISK_PER_TRADE = 0.02  # 2% risk per trade (for position sizing)
 # SIGNAL REQUIREMENTS (à¶”à¶¶à·š à¶…à¶½à·”à¶­à·Š conditions)
 # ============================================================
 MIN_TOOLS_MATCH = 3  # Tools 5à¶±à·Š à¶…à·€à¶¸ à¶œà·à¶½à¶´à·™à¶± à¶œà¶«à¶± (5/3 rule)
-MIN_PROFIT_CHANCE = 65.0  # à¶…à·€à¶¸ profit chance à¶‘à¶š 65%
+MIN_PROFIT_CHANCE = 45.0  # FIX: calibration_table.json (27,042 real backtested
+# setups) shows NO score bucket ever reaches 65% real win-rate — the
+# highest bucket (90-100 raw score) only wins 51.7% of the time. Since
+# analysis_engine._get_calibrated_profit_chance() replaces the raw score
+# with this real win-rate once the table is loaded, a 65% threshold would
+# silently reject every single trade forever. Breakeven here (TP 2% / SL 1%
+# / 0.05% fee per side) is ~36.7%; 45.0 keeps a real safety margin above
+# breakeven while only admitting buckets with genuine historical edge
+# (70-80: 40.0%, 80-90: 45.7%, 90-100: 51.7%). Re-tune this after each
+# fresh calibration run — it should track whatever the real buckets show,
+# not an assumed number.
 SCAN_INTERVAL_SECONDS = 30  # à·ƒà·‘à¶¸ à¶­à¶­à·Š 30à¶šà¶§ à·€à¶»à¶šà·Š scan (24/7)
 BALANCE_CHECK_INTERVAL = 60  # Balance check interval seconds
 WAIT_FOR_BALANCE = True  # Balance à¶±à·à¶­à·’ à·€à·™à¶½à·à·€à¶§ crash à¶±à·œà·€à·“ wait à¶šà¶»à¶±à·Šà¶±
