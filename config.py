@@ -87,6 +87,20 @@ TRAILING_STOP_ACTIVATE = 0.5   # Activate trailing at 0.5% profit
 TRAILING_STOP_DISTANCE = 0.3   # Trailing stop distance 0.3%
 MAX_OPEN_TRADES = 15           # Maximum concurrent trades
 
+# FIX (TP1 -> TP2 continuation): the moment a trade's first take-profit
+# (TP1) is hit, instead of closing immediately, the bot re-analyzes that
+# symbol right then with the exact same tools/timeframes used for entries.
+# If the fresh analysis still confirms continuation in the trade's
+# direction (same rule used for entries/reversals: MIN_TOOLS_MATCH tools
+# agreeing), the stop loss is moved up to the TP1 price (locking in that
+# profit) and a further TP2 target is set instead of closing. If the
+# fresh analysis does NOT confirm continuation, or fresh market data can't
+# be fetched at that moment, the trade closes at TP1 exactly as before —
+# nothing changes for that case. This applies automatically to every open
+# trade the bot manages; set to False to fully restore the old behavior
+# (close immediately on any TP hit).
+TP1_REANALYSIS_ENABLED = True
+
 # FIX (Real win-rate): Binance USDT-M futures taker fee, charged on BOTH
 # the entry fill and the exit fill. Used to subtract real trading cost
 # from a closed trade's PnL so the win-rate stat reflects actual net
