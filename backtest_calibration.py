@@ -35,6 +35,7 @@ Usage:
 import argparse
 import json
 import logging
+import re
 import time
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
@@ -78,6 +79,60 @@ KLINE_COLUMNS = [
     "taker_buy_base", "taker_buy_quote", "ignore"
 ]
 
+# FIX (IP-ban cascade bug): the script used to have no delay between
+# symbols/timeframes (only a 0.25s sleep between *pages* of the SAME
+# symbol+timeframe), so 40 coins x 3 timeframes x several pages each fired
+# far faster than Binance's rate limit tolerates, tripping a -1003 IP ban.
+# Once banned, every request for the rest of the run just got the same
+# "banned until <ms>" error back instantly - the script never waited it
+# out, so it burned through most of the coin list getting nothing.
+# This constant adds a small pause between every individual request
+# (page, timeframe, or symbol) so the run stays under the limit and
+# shouldn't get banned in the first place.
+REQUEST_PACING_SECONDS = 1.0
+
+_BAN_MSG_RE = re.compile(r"banned until (\d+)")
+
+
+def _extract_ban_until_ms(payload) -> Optional[int]:
+    """Pull the 'banned until <epoch_ms>' timestamp out of a Binance -1003
+    error payload/message, if present."""
+    msg = ""
+    if isinstance(payload, dict):
+        msg = str(payload.get("msg", ""))
+    else:
+        msg = str(payload)
+    match = _BAN_MSG_RE.search(msg)
+    return int(match.group(1)) if match else None
+
+
+def _wait_out_ban(ban_until_ms: int, context: str):
+    """FIX (IP-ban cascade bug): if Binance has banned this IP, sleep until
+    the ban actually lifts (plus a small safety buffer) instead of
+    continuing to fire requests into the ban window - repeated requests
+    during an active ban don't get more data, they just risk the ban being
+    extended and waste the whole rest of the run."""
+    now_ms = int(time.time() * 1000)
+    wait_seconds = max(0.0, (ban_until_ms - now_ms) / 1000.0) + 2.0
+    logger.warning(f"⏳ {context}: IP is rate-limit banned by Binance. "
+                    f"Waiting {wait_seconds:.0f}s for the ban to lift before continuing...")
+    time.sleep(wait_seconds)
+
+
+def klines_with_ban_handling(client: BinanceFuturesClient, context: str, **kwargs):
+    """Wraps client.klines() so a -1003 IP ban pauses and retries instead of
+    being treated as a permanent per-symbol failure."""
+    max_ban_retries = 5
+    for attempt in range(max_ban_retries):
+        batch = client.klines(**kwargs)
+        if isinstance(batch, dict) and batch.get("code") == -1003:
+            ban_until = _extract_ban_until_ms(batch)
+            if ban_until:
+                _wait_out_ban(ban_until, context)
+                continue  # retry the same request now that the ban should be lifted
+        return batch
+    return batch  # give up after max_ban_retries, let the caller's normal error handling deal with it
+
 
 def fetch_full_history(client: BinanceFuturesClient, symbol: str, interval: str,
                         months_back: int) -> Optional[pd.DataFrame]:
@@ -104,8 +159,11 @@ def fetch_full_history(client: BinanceFuturesClient, symbol: str, interval: str,
         if cursor >= end_ms:
             break
         try:
-            batch = client.klines(symbol=symbol, interval=interval, limit=1500,
-                                   start_time=cursor, end_time=end_ms)
+            batch = klines_with_ban_handling(
+                client, f"{symbol} {interval}",
+                symbol=symbol, interval=interval, limit=1500,
+                start_time=cursor, end_time=end_ms
+            )
         except Exception as e:
             logger.warning(f"{symbol} {interval}: klines request failed at cursor={cursor}: {e}")
             break
@@ -140,7 +198,7 @@ def fetch_full_history(client: BinanceFuturesClient, symbol: str, interval: str,
         if len(batch) < 1500:
             break  # short batch means we've caught up to "now"
 
-        time.sleep(0.25)  # be gentle with rate limits across a multi-month pull
+        time.sleep(REQUEST_PACING_SECONDS)  # be gentle with rate limits across a multi-month pull
 
     if not all_rows:
         return None
@@ -194,7 +252,9 @@ def run_calibration_for_symbol(engine: AnalysisEngine, client: BinanceFuturesCli
     logger.info(f"Fetching history for {symbol}...")
 
     higher_df = fetch_full_history(client, symbol, TIMEFRAMES["higher"], months_back)
+    time.sleep(REQUEST_PACING_SECONDS)
     medium_df = fetch_full_history(client, symbol, TIMEFRAMES["medium"], months_back)
+    time.sleep(REQUEST_PACING_SECONDS)
     lower_df = fetch_full_history(client, symbol, TIMEFRAMES["lower"], months_back)
 
     if higher_df is None or medium_df is None or lower_df is None:
@@ -313,6 +373,7 @@ def main():
         except Exception as e:
             logger.error(f"{symbol}: calibration failed: {e}")
             continue
+        time.sleep(REQUEST_PACING_SECONDS)  # pace between symbols too
 
     if not all_labeled:
         logger.error("No samples collected - nothing to write. Check API access/logs above.")
