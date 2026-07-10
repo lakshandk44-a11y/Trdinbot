@@ -289,6 +289,12 @@ class HackerAIBot:
         self.analysis_engine = AnalysisEngine(config)
         self.trade_manager = TradeManager(config, self.client)
 
+        # FIX (TP1 -> TP2 continuation): give TradeManager a way to ask
+        # "should this trade extend past TP1?" the instant TP1 is hit.
+        # TradeManager has no analysis engine or OHLC access of its own,
+        # so it calls back into bot_core to get a fresh answer.
+        self.trade_manager.set_tp1_reanalysis_callback(self._tp1_reanalysis_decision)
+
         # State
         self.balance = 0.0
         self.account_info = {}
@@ -885,6 +891,63 @@ class HackerAIBot:
                 self.trade_manager.update_trade_price(symbol, float(ticker["price"]))
             except Exception as e:
                 logger.debug(f"Price update error for {symbol}: {e}")
+
+    def _tp1_reanalysis_decision(self, symbol: str, trade: Dict) -> Optional[Dict]:
+        """
+        FIX (TP1 -> TP2 continuation): called by TradeManager the instant a
+        trade's TP1 is hit, BEFORE it would otherwise be closed. Re-fetches
+        fresh multi-timeframe data and re-runs the exact same analysis used
+        for entries and reversal checks (same tools, same MIN_TOOLS_MATCH
+        rule) — nothing new is introduced here, it's the identical decision
+        process, just re-run at this exact moment for this one symbol.
+
+        Returns None if the market does NOT confirm continuation, or if
+        fresh data can't be fetched right now — TradeManager then closes
+        the trade at TP1 exactly as it always has. Returns
+        {"extend": True, "new_sl": <price>, "new_tp": <price>} if
+        continuation IS confirmed, so TradeManager moves the stop up to the
+        TP1 price (locking in that profit) and keeps the trade open toward
+        the new TP2 level instead.
+        """
+        try:
+            ohlc_data = self._fetch_multi_timeframe(symbol)
+            if ohlc_data is None:
+                logger.warning(f"⚠️ {symbol}: no fresh data for TP1 re-analysis — closing at TP1.")
+                return None
+            analysis = self.analysis_engine.multi_timeframe_analysis(ohlc_data)
+        except Exception as e:
+            logger.error(f"⚠️ {symbol}: TP1 re-analysis fetch/analysis failed ({e}) — closing at TP1.")
+            return None
+
+        final = analysis.get("final_signal", {})
+        direction = final.get("direction", 0)
+        tools_agreeing = final.get("tools_agreeing", 0)
+        min_tools = self.config.get("MIN_TOOLS_MATCH", 3)
+
+        side = trade["side"]
+        wants_continue = (side == "BUY" and direction == 1) or (side == "SELL" and direction == -1)
+        if not wants_continue or tools_agreeing < min_tools:
+            return None  # market doesn't confirm continuation -> close at TP1, unchanged
+
+        tp1_level = trade["take_profit"]
+
+        # Reuse the same order-block / FVG / liquidity level detection used
+        # to set the original TP/SL, just anchored at the TP1 price instead
+        # of the entry price, to find the NEXT resistance/support beyond it.
+        new_tp, _ = self._get_analysis_based_tp_sl(symbol, side, tp1_level, analysis)
+
+        min_extra = abs(tp1_level - trade["entry_price"]) * 0.5
+        if new_tp is None or abs(new_tp - tp1_level) < min_extra:
+            tp_percent = self.config.get("TAKE_PROFIT_PERCENT", 2.0) / 100
+            extra = trade["entry_price"] * tp_percent
+            new_tp = tp1_level + extra if side == "BUY" else tp1_level - extra
+
+        new_sl = tp1_level  # lock in the TP1-level profit as the new stop
+
+        logger.info(f"🧠 {symbol}: TP1 hit, fresh analysis confirms continuation "
+                    f"({tools_agreeing}/{min_tools} tools) — requesting extension to TP2.")
+
+        return {"extend": True, "new_sl": new_sl, "new_tp": new_tp}
 
     def _check_trade_reversals(self):
         """
