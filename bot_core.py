@@ -715,11 +715,21 @@ class HackerAIBot:
         # leverage multiplication inside calculate_position_size inflated
         # real risk on a stop-loss hit far beyond the intended
         # RISK_PER_TRADE percentage.
+        # FIX (margin-insufficient regression): pass final_position (the
+        # already-validated margin*leverage notional — "TRADE POSSIBLE!
+        # ... Position=$X" above) as the primary size driver, since that's
+        # the number already checked against exchange min/max notional and
+        # available margin. account_balance is passed separately, used only
+        # as a downward risk-cap inside calculate_position_size — it must
+        # never be the sole basis for quantity (that disconnect from
+        # final_position/margin is what caused "Margin is insufficient"
+        # errors after the previous fix).
         quantity = self.trade_manager.calculate_position_size(
-            self.balance,
+            final_position,
             current_price,
             sl_price,
-            final_leverage
+            final_leverage,
+            account_balance=self.balance
         )
         quantity = self._round_quantity(symbol, quantity)
 
