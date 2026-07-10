@@ -421,32 +421,44 @@ class TradeManager:
                 logger.error(f"Monitor loop error: {e}")
                 time.sleep(10)
     
-    def calculate_position_size(self, balance: float, entry_price: float, 
-                                stop_loss_price: float, leverage: int) -> float:
+    def calculate_position_size(self, position_value: float, entry_price: float,
+                                stop_loss_price: float, leverage: int,
+                                account_balance: Optional[float] = None) -> float:
         """
-        Calculate position size with risk management.
+        Calculate order quantity (base-asset units).
 
-        FIX (Double-leverage sizing bug): quantity = risk_amount / price_risk
-        ALREADY gives the exact base-asset quantity that loses `risk_amount`
-        (e.g. 2% of balance) if the stop-loss is hit — leverage only affects
-        the margin required to hold that quantity, not the P&L from a given
-        price move. The old code multiplied this already-correct quantity by
-        `leverage` again, so a real SL hit lost `risk_amount * leverage`
-        instead of `risk_amount` (e.g. 50% of the trade's margin at 5x
-        leverage instead of the intended 2% of balance). Also see the caller
-        in bot_core.py, which must pass the true account balance here, not
-        an already-leveraged notional value.
+        FIX (margin-insufficient regression): `position_value` here is the
+        already-validated margin*leverage notional the caller computed in
+        bot_core._execute_trade (logged as "TRADE POSSIBLE! ... Position=$X")
+        - it has already been checked against the exchange's min/max
+        notional and the actually available margin. That MUST stay the
+        primary driver of order size, or the order can request a
+        completely different (often far larger) notional than what was
+        validated, which is exactly what caused the -2019 "Margin is
+        insufficient" errors: the previous version of this function ignored
+        position_value entirely and derived quantity purely from
+        account_balance * RISK_PER_TRADE / stop-distance, with no ceiling
+        tied to the margin actually allocated for the trade.
+
+        account_balance (optional) is only used as a downward safety cap:
+        if the validated position_value would risk more than
+        RISK_PER_TRADE% of the real account balance on a stop-loss hit,
+        the quantity is scaled DOWN (never up) to keep real risk within
+        that budget. This also fixes the earlier double-leverage bug
+        (real risk used to be risk_amount * leverage instead of
+        risk_amount) without reintroducing this regression.
         """
-        risk_percent = self.config.get("RISK_PER_TRADE", 0.02)
-        risk_amount = balance * risk_percent
-        
-        price_risk = abs(entry_price - stop_loss_price)
-        if price_risk == 0:
-            price_risk = entry_price * 0.01
-        
-        position_value = risk_amount / (price_risk / entry_price)
         quantity = position_value / entry_price
-        
+
+        if account_balance:
+            risk_percent = self.config.get("RISK_PER_TRADE", 0.02)
+            risk_amount = account_balance * risk_percent
+            price_risk = abs(entry_price - stop_loss_price)
+            if price_risk > 0:
+                actual_risk = quantity * price_risk
+                if actual_risk > risk_amount:
+                    quantity = risk_amount / price_risk  # scale down only
+
         return quantity
     
     def open_new_trade(self, symbol: str, side: str, entry_price: float, 
