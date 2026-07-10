@@ -53,7 +53,26 @@ class TradeManager:
         # to disk on every change and reloaded here on startup.
         self.state_file = self.config.get("TRADE_STATE_FILE", "trade_state.json")
         self._load_state()
+
+        # FIX (TP1 -> TP2 continuation): optional callback, wired up by
+        # bot_core via set_tp1_reanalysis_callback(), that re-runs fresh
+        # market analysis the moment a trade's TP1 is hit. TradeManager
+        # itself has no analysis engine or OHLC data — it only asks the
+        # callback for a decision and acts on the result. Left as None
+        # (feature inert) until bot_core registers it.
+        self.tp1_reanalysis_callback = None
         
+    def set_tp1_reanalysis_callback(self, callback):
+        """
+        FIX (TP1 -> TP2 continuation): register the function bot_core uses
+        to re-analyze a symbol the instant its TP1 is hit. Expected
+        signature: callback(symbol: str, trade: Dict) -> Optional[Dict].
+        Return None (or a dict without "extend": True) to close at TP1 as
+        before; return {"extend": True, "new_sl": <price>, "new_tp": <price>}
+        to keep the trade open with those new levels instead.
+        """
+        self.tp1_reanalysis_callback = callback
+
     def start_monitoring(self):
         """Start background monitoring (24/7)"""
         self.running = True
@@ -282,18 +301,32 @@ class TradeManager:
             logger.error(f"⚠️ Could not place exchange STOP_MARKET for {symbol}: {e}. "
                          f"Falling back to software-side monitoring only for this trade.")
 
-        try:
-            tp_order = self.client.new_stop_order(
-                symbol=symbol, side=close_side, stop_price=trade["take_profit"],
-                quantity=trade["quantity"], order_type="TAKE_PROFIT_MARKET",
-                positionSide=position_side
-            )
-            trade["tp_order_id"] = tp_order.get("orderId")
-            logger.info(f"🛡️ Exchange TAKE_PROFIT_MARKET placed: {symbol} @ {trade['take_profit']:.8f}")
-        except Exception as e:
+        # FIX (TP1 -> TP2 continuation): a resting exchange-side
+        # TAKE_PROFIT_MARKET order would fully close the position the
+        # instant price touches TP1 — before the bot's own monitor loop
+        # gets a chance to re-analyze the market and possibly extend to
+        # TP2. So while this feature is enabled, TP is watched and acted
+        # on by the bot's software-side monitor only (still every 5s, see
+        # _monitor_loop); the SL above stays a real exchange order either
+        # way, so the trade is never left without exchange-side downside
+        # protection even if the bot/VPS goes offline.
+        if self.config.get("TP1_REANALYSIS_ENABLED", False):
             trade["tp_order_id"] = None
-            logger.error(f"⚠️ Could not place exchange TAKE_PROFIT_MARKET for {symbol}: {e}. "
-                         f"Falling back to software-side monitoring only for this trade.")
+            logger.info(f"🧠 {symbol}: TP managed by bot analysis (TP1_REANALYSIS_ENABLED) — "
+                        f"no resting exchange TP order; SL stays exchange-protected.")
+        else:
+            try:
+                tp_order = self.client.new_stop_order(
+                    symbol=symbol, side=close_side, stop_price=trade["take_profit"],
+                    quantity=trade["quantity"], order_type="TAKE_PROFIT_MARKET",
+                    positionSide=position_side
+                )
+                trade["tp_order_id"] = tp_order.get("orderId")
+                logger.info(f"🛡️ Exchange TAKE_PROFIT_MARKET placed: {symbol} @ {trade['take_profit']:.8f}")
+            except Exception as e:
+                trade["tp_order_id"] = None
+                logger.error(f"⚠️ Could not place exchange TAKE_PROFIT_MARKET for {symbol}: {e}. "
+                             f"Falling back to software-side monitoring only for this trade.")
 
         self._save_state()
 
@@ -463,6 +496,10 @@ class TradeManager:
             "leverage": leverage,
             "take_profit": take_profit,
             "stop_loss": stop_loss,
+            # FIX (TP1 -> TP2 continuation): 1 = still targeting the
+            # original TP; 2 = already extended past TP1 into a TP2 run.
+            # Extension is only ever attempted once per trade (stage 1->2).
+            "tp_stage": 1,
             "current_price": entry_price,
             "pnl_percent": 0.0,
             "pnl_amount": 0.0,
@@ -516,6 +553,81 @@ class TradeManager:
                 if trade["lowest_price"] is None or current_price < trade["lowest_price"]:
                     trade["lowest_price"] = current_price
     
+    def _maybe_extend_to_tp2(self, trade: Dict) -> bool:
+        """
+        FIX (TP1 -> TP2 continuation): called the instant TP1 is hit, before
+        the trade would otherwise be closed. Asks bot_core's registered
+        callback to re-analyze the market for this symbol RIGHT NOW. If the
+        fresh analysis still supports continuation, the trade's SL is moved
+        up to the TP1 price (locking in that profit) and a new TP2 target is
+        set — the trade stays OPEN instead of closing. Returns True if the
+        trade was extended (caller must NOT close it), False if it should
+        close at TP1 exactly as before (feature disabled, no callback,
+        analysis unavailable, or analysis doesn't confirm continuation).
+
+        This only ever fires once per trade: tp_stage flips from 1 to 2 as
+        soon as it fires, and this function immediately no-ops for any
+        trade already at stage 2 (or beyond), so a TP2 hit later always
+        closes the trade normally.
+        """
+        if not self.config.get("TP1_REANALYSIS_ENABLED", False):
+            return False
+        if trade.get("tp_stage", 1) != 1:
+            return False
+        if not self.tp1_reanalysis_callback:
+            return False
+
+        symbol = trade["symbol"]
+        try:
+            decision = self.tp1_reanalysis_callback(symbol, trade)
+        except Exception as e:
+            logger.error(f"⚠️ TP1 re-analysis callback failed for {symbol}: {e}. "
+                         f"Closing at TP1 as normal.")
+            return False
+
+        if not decision or not decision.get("extend"):
+            logger.info(f"🧠 {symbol}: fresh analysis does NOT confirm continuation — "
+                        f"closing at TP1 as normal.")
+            return False
+
+        new_sl = decision.get("new_sl")
+        new_tp = decision.get("new_tp")
+        side = trade["side"]
+
+        # Sanity check: the new levels must actually sit on the correct
+        # side of the current price, or extending would be meaningless
+        # (or immediately re-trigger). If they don't check out, fall back
+        # to closing at TP1 instead of trusting a bad level.
+        current_price = trade["current_price"]
+        if new_sl is None or new_tp is None:
+            return False
+        if side == "BUY" and not (new_sl < current_price < new_tp):
+            logger.warning(f"⚠️ {symbol}: TP1 extension levels failed sanity check "
+                            f"(SL {new_sl} / price {current_price} / TP {new_tp}) — closing at TP1.")
+            return False
+        if side == "SELL" and not (new_tp < current_price < new_sl):
+            logger.warning(f"⚠️ {symbol}: TP1 extension levels failed sanity check "
+                            f"(TP {new_tp} / price {current_price} / SL {new_sl}) — closing at TP1.")
+            return False
+
+        old_tp = trade["take_profit"]
+        old_sl = trade["stop_loss"]
+        trade["take_profit"] = self._round_price(symbol, new_tp)
+        trade["tp_stage"] = 2
+
+        # Move the exchange-side stop up to lock in the TP1-level profit.
+        # Reuses the same cancel-safe "place new, then cancel old" trailing
+        # stop mechanism already used elsewhere, so there's never a moment
+        # with zero exchange-side protection.
+        self._update_trailing_stop_order(symbol, trade, new_sl)
+
+        logger.info(f"🚀 {symbol}: continuation confirmed — extending past TP1. "
+                    f"SL {old_sl:.8f} -> {trade['stop_loss']:.8f} | "
+                    f"TP {old_tp:.8f} -> {trade['take_profit']:.8f} (TP2)")
+
+        self._save_state()
+        return True
+
     def _evaluate_trade(self, trade: Dict):
         """Evaluate trade for SL/TP/trailing"""
         if trade["status"] != "OPEN":
@@ -527,10 +639,14 @@ class TradeManager:
         # Take Profit check
         if side == "BUY" and current_price >= trade["take_profit"]:
             logger.info(f"🎯 TP HIT: {trade['symbol']} @ {current_price:.8f} (PnL: {trade['pnl_percent']:.2f}%)")
+            if self._maybe_extend_to_tp2(trade):
+                return
             self._close_trade(trade["symbol"], "TAKE_PROFIT")
             return
         elif side == "SELL" and current_price <= trade["take_profit"]:
             logger.info(f"🎯 TP HIT: {trade['symbol']} @ {current_price:.8f} (PnL: {trade['pnl_percent']:.2f}%)")
+            if self._maybe_extend_to_tp2(trade):
+                return
             self._close_trade(trade["symbol"], "TAKE_PROFIT")
             return
         
