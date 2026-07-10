@@ -110,6 +110,22 @@ def fetch_full_history(client: BinanceFuturesClient, symbol: str, interval: str,
             logger.warning(f"{symbol} {interval}: klines request failed at cursor={cursor}: {e}")
             break
 
+        # FIX ('backtest failed: -1' bug): when a symbol is invalid, delisted,
+        # or renamed on Binance Futures (e.g. an old TOP_40_COINS entry that
+        # no longer exists as-is), the klines endpoint returns a JSON error
+        # OBJECT like {"code": -1121, "msg": "Invalid symbol."} instead of a
+        # list of candles. That dict is truthy and iterable, so without this
+        # check it silently got extended into all_rows (as its string keys)
+        # and then `batch[-1][0]` crashed with a bare KeyError(-1) deep in
+        # the pagination loop - which surfaced up in main() as the
+        # unhelpful "{symbol}: backtest failed: -1" message. Now it's
+        # detected immediately and skipped with a clear reason instead.
+        if isinstance(batch, dict):
+            logger.warning(f"{symbol} {interval}: Binance returned an error instead of candles "
+                            f"(code={batch.get('code')}, msg={batch.get('msg')}) - symbol is "
+                            f"likely invalid/delisted/renamed on Futures. Skipping this symbol.")
+            return None
+
         if not batch:
             break
 
