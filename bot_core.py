@@ -534,30 +534,16 @@ class HackerAIBot:
         reverse. This uses the same order block / FVG / liquidity data the
         5 tools already compute — no new indicators are introduced.
 
-        Every candidate is checked to be strictly on the correct side of
-        entry_price (a "resistance" behind current price is useless), and
-        the final distance is clamped to [0.5x, 3x] of the configured
-        TAKE_PROFIT_PERCENT/STOP_LOSS_PERCENT. This keeps the target
-        realistic — close enough that the trade can plausibly reach it
-        before conditions change, never so tight it behaves like noise,
-        and never so far it stops being a sane risk/reward for this
-        strategy. Returns (None, None) if no timeframe has a usable level,
-        so the caller can fall back to the existing fixed-percent behavior
-        exactly as before.
+        CHANGE (per explicit request): the detected level is used AS-IS,
+        with no min/max clamp on the distance — whatever resistance/support
+        the analysis finds is exactly where TP/SL gets placed, however
+        close or far that is. Every candidate is still checked to be
+        strictly on the correct side of entry_price (a "resistance" behind
+        current price is useless). Returns (None, None) if no timeframe has
+        a usable level, so the caller falls back to the existing fixed-
+        percent (TAKE_PROFIT_PERCENT/STOP_LOSS_PERCENT) behavior exactly as
+        before — that fallback is unchanged.
         """
-        tp_percent = self.config.get("TAKE_PROFIT_PERCENT", 2.0) / 100
-        sl_percent = self.config.get("STOP_LOSS_PERCENT", 1.0) / 100
-        min_mult, max_mult = 0.5, 3.0
-
-        def clamp(level: float, base_percent: float, is_tp: bool) -> float:
-            distance = abs(level - entry_price)
-            min_dist = entry_price * base_percent * min_mult
-            max_dist = entry_price * base_percent * max_mult
-            distance = max(min_dist, min(distance, max_dist))
-            if (side == "BUY" and is_tp) or (side == "SELL" and not is_tp):
-                return entry_price + distance
-            return entry_price - distance
-
         resistance_candidates = []
         support_candidates = []
 
@@ -597,9 +583,7 @@ class HackerAIBot:
             tp_level = max(tp_pool) if tp_pool else None   # nearest support below
             sl_level = min(sl_pool) if sl_pool else None   # nearest resistance above
 
-        final_tp = clamp(tp_level, tp_percent, is_tp=True) if tp_level is not None else None
-        final_sl = clamp(sl_level, sl_percent, is_tp=False) if sl_level is not None else None
-        return final_tp, final_sl
+        return tp_level, sl_level
 
     def _execute_trade(self, symbol: str, decision: str, signal: Dict, ohlc_data: Dict,
                         analysis: Optional[Dict] = None):
