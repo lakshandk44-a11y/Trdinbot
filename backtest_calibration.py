@@ -63,7 +63,12 @@ OUTPUT_FILE = "calibration_table.json"
 # engine sees here has the same amount of context the live bot would have.
 LOOKBACK_LIMIT = {"higher": 100, "medium": 150, "lower": 200}
 FORWARD_LOOKAHEAD_CANDLES = 200  # 200 * 15m = ~50 hours to resolve TP/SL
-STRIDE = 3  # evaluate every 3rd medium-timeframe candle (keeps runtime sane)
+STRIDE = 1  # FIX: was 3 (every 3rd medium-timeframe candle) to save runtime,
+# but that meant the hour-of-day breakdown only ever sampled hours at a
+# fixed 3-hour offset (2,5,8,11,14,17,20,23 UTC), leaving the other 16
+# hours completely unsampled (0 setups) - not "bad", just never checked.
+# STRIDE=1 evaluates every medium-timeframe (1h) candle, giving full
+# 24-hour coverage. Runtime will be ~3x longer.
 
 # Binance kline interval -> milliseconds, used to paginate klines() by
 # startTime/endTime instead of only ever getting the most recent `limit`.
