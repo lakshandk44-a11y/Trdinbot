@@ -25,7 +25,7 @@ RISK_PER_TRADE = 0.02  # 2% risk per trade (for position sizing)
 # ============================================================
 # SIGNAL REQUIREMENTS (à¶”à¶¶à·š à¶…à¶½à·”à¶­à·Š conditions)
 # ============================================================
-MIN_TOOLS_MATCH = 3  # Tools 5à¶±à·Š à¶…à·€à¶¸ à¶œà·à¶½à¶´à·™à¶± à¶œà¶«à¶± (5/3 rule)
+MIN_TOOLS_MATCH = 4  # Tools 5à¶±à·Š à¶…à·€à¶¸ à¶œà·à¶½à¶´à·™à¶± à¶œà¶«à¶± (5/3 rule)
 MIN_PROFIT_CHANCE = 37.0  # FIX: calibration_table.json (27,042 real backtested
 # setups) shows NO score bucket ever reaches 65% real win-rate — the
 # highest bucket (90-100 raw score) only wins 51.7% of the time. Since
@@ -95,7 +95,7 @@ TAKE_PROFIT_PERCENT = 5.0      # 5% take profit (also the clamp-range base for a
 STOP_LOSS_PERCENT = 3.0        # 3% stop loss (also the clamp-range base for analysis-based SL)
 TRAILING_STOP_ACTIVATE = 0.5   # Activate trailing at 0.5% profit
 TRAILING_STOP_DISTANCE = 0.3   # Trailing stop distance 0.3%
-MAX_OPEN_TRADES = 15           # Maximum concurrent trades
+MAX_OPEN_TRADES = 10           # Maximum concurrent trades
 
 # FIX (TP1 -> TP2 continuation): the moment a trade's first take-profit
 # (TP1) is hit, instead of closing immediately, the bot re-analyzes that
