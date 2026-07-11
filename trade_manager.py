@@ -680,6 +680,25 @@ class TradeManager:
             self._close_trade(trade["symbol"], "STOP_LOSS")
             return
         
+        # FIX (trailing stop should only trail after an analysis-confirmed
+        # TP1 continuation, per explicit request): previously this simple
+        # %-based trailing activated the instant price moved
+        # TRAILING_STOP_ACTIVATE (0.5%) in the trade's favor, regardless of
+        # whether TP1 had ever been reached or whether the market had been
+        # re-analyzed at all — it was pure price-following, no analysis
+        # involved. Now it only runs once trade["tp_stage"] >= 2, which
+        # ONLY happens via _maybe_extend_to_tp2() confirming continuation
+        # with a fresh multi-timeframe analysis at the exact moment TP1 was
+        # hit (same tools/MIN_TOOLS_MATCH bar as an entry). Before that
+        # point, the trade's SL stays exactly at its original
+        # analysis-derived (or fallback %) level - no price-based trailing
+        # occurs pre-TP1. After tp_stage reaches 2, the profit up to TP1 is
+        # already locked in by that same analysis-confirmed extension (SL
+        # moved to the TP1 price), and this simple trailing then continues
+        # tightening the stop further as price extends into the TP2 leg.
+        if trade.get("tp_stage", 1) < 2:
+            return
+
         # Trailing Stop
         activate_pct = self.config.get("TRAILING_STOP_ACTIVATE", 0.5) / 100
         trail_dist = self.config.get("TRAILING_STOP_DISTANCE", 0.3) / 100
