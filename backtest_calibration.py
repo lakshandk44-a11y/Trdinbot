@@ -331,7 +331,8 @@ def run_calibration_for_symbol(engine: AnalysisEngine, client: BinanceFuturesCli
             continue  # unresolved within lookahead - discard, don't guess
 
         raw_score = float(final.get("profit_chance", 0.0))
-        labeled.append({"score": raw_score, "won": won})
+        entry_hour_utc = datetime.utcfromtimestamp(current_time / 1000).hour
+        labeled.append({"score": raw_score, "won": won, "hour": entry_hour_utc})
 
     logger.info(f"{symbol}: {len(labeled)} labeled setups collected")
     return labeled
@@ -349,6 +350,27 @@ def build_buckets(labeled: List[Dict]) -> Dict[str, Dict]:
         floor = int(item["score"] // 10) * 10
         floor = min(floor, 90)
         key = f"{floor}-{floor + 10}"
+        buckets[key]["samples"] += 1
+        if item["won"]:
+            buckets[key]["wins"] += 1
+
+    result: Dict[str, Dict] = {}
+    for key, b in buckets.items():
+        win_rate = round(b["wins"] / b["samples"] * 100, 2) if b["samples"] else None
+        result[key] = {"win_rate": win_rate, "samples": b["samples"]}
+    return result
+
+
+def build_hour_buckets(labeled: List[Dict]) -> Dict[str, Dict]:
+    """Groups labeled setups by entry hour (UTC, 0-23) and computes the
+    real win-rate observed in each hour - lets us check whether trading
+    session/time-of-day (e.g. Asian vs London/NY overlap) actually makes a
+    measurable difference for this bot's setups, instead of assuming it
+    does or doesn't based on theory alone."""
+    buckets: Dict[str, Dict] = {f"{h:02d}:00-{h:02d}:59": {"wins": 0, "samples": 0} for h in range(24)}
+
+    for item in labeled:
+        key = f"{item['hour']:02d}:00-{item['hour']:02d}:59"
         buckets[key]["samples"] += 1
         if item["won"]:
             buckets[key]["wins"] += 1
@@ -397,6 +419,7 @@ def main():
         return
 
     buckets = build_buckets(all_labeled)
+    hour_buckets = build_hour_buckets(all_labeled)
 
     output = {
         "generated_at": datetime.utcnow().isoformat(),
@@ -409,12 +432,35 @@ def main():
     with open(args.output, "w") as f:
         json.dump(output, f, indent=2)
 
+    # Hour-of-day breakdown is written to its own file, separate from
+    # calibration_table.json. analysis_engine._get_calibrated_profit_chance()
+    # only knows how to read the score-bucket schema above - keeping this
+    # separate means the live bot's calibration lookup is completely
+    # unaffected; this file is purely for us to inspect (e.g. "is UTC 13-16
+    # genuinely better than UTC 02-05?") before deciding whether a
+    # session/time filter is worth adding.
+    hourly_output = {
+        "generated_at": datetime.utcnow().isoformat(),
+        "months_backtested": args.months,
+        "total_samples": len(all_labeled),
+        "note": "hour is UTC, entry candle time. Informational only - not read by the live bot.",
+        "hour_buckets": hour_buckets,
+    }
+    hourly_path = "hourly_breakdown.json"
+    with open(hourly_path, "w") as f:
+        json.dump(hourly_output, f, indent=2)
+
     logger.info("=" * 65)
     logger.info(f"Calibration table written to {args.output}")
     logger.info(f"Total setups evaluated: {len(all_labeled)}")
     logger.info("-" * 65)
     for key, b in buckets.items():
         logger.info(f"  {key:>7}: win_rate={b['win_rate']}%  samples={b['samples']}")
+    logger.info("=" * 65)
+    logger.info(f"Hour-of-day (UTC) breakdown written to {hourly_path}")
+    logger.info("-" * 65)
+    for key, b in hour_buckets.items():
+        logger.info(f"  {key}: win_rate={b['win_rate']}%  samples={b['samples']}")
     logger.info("=" * 65)
 
 
