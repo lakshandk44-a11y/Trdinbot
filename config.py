@@ -26,7 +26,7 @@ RISK_PER_TRADE = 0.02  # 2% risk per trade (for position sizing)
 # SIGNAL REQUIREMENTS (à¶”à¶¶à·š à¶…à¶½à·”à¶­à·Š conditions)
 # ============================================================
 MIN_TOOLS_MATCH = 3  # Tools 5à¶±à·Š à¶…à·€à¶¸ à¶œà·à¶½à¶´à·™à¶± à¶œà¶«à¶± (5/3 rule)
-MIN_PROFIT_CHANCE = 37.0  # FIX: calibration_table.json (27,042 real backtested
+MIN_PROFIT_CHANCE = 45.0  # FIX: calibration_table.json (27,042 real backtested
 # setups) shows NO score bucket ever reaches 65% real win-rate — the
 # highest bucket (90-100 raw score) only wins 51.7% of the time. Since
 # analysis_engine._get_calibrated_profit_chance() replaces the raw score
@@ -38,6 +38,23 @@ MIN_PROFIT_CHANCE = 37.0  # FIX: calibration_table.json (27,042 real backtested
 # fresh calibration run — it should track whatever the real buckets show,
 # not an assumed number.
 SCAN_INTERVAL_SECONDS = 30  # à·ƒà·‘à¶¸ à¶­à¶­à·Š 30à¶šà¶§ à·€à¶»à¶šà·Š scan (24/7)
+
+# ============================================================
+# TRADING HOURS FILTER (2026-07-11 hourly_breakdown.json, STRIDE=1,
+# full 24h coverage, 64,359 setups, ~2,500-2,900 samples per hour)
+# ============================================================
+# Breakeven with TP=5%/SL=3%/0.1% round-trip fee is ~38.75%. Only
+# 12:00-16:59 UTC cleared it (12:00=40.13%, 13:00=39.64%, 14:00=40.44%,
+# 15:00=38.76%, 16:00=38.76%) - all 5 hours with large, comparable sample
+# sizes, consistent with the London-afternoon/NY-morning liquidity
+# overlap. Every other hour of the day was below breakeven (31-37%).
+# When enabled, NEW trades only open during these hours - trades already
+# open outside this window keep being managed normally (SL/TP/trailing
+# untouched; this only gates new entries). Re-verify against a fresh
+# hourly_breakdown.json periodically, since this reflects one backtest
+# window, not a permanent law of the market.
+TRADING_HOURS_FILTER_ENABLED = True
+ALLOWED_TRADING_HOURS_UTC = [12, 13, 14, 15, 16]
 BALANCE_CHECK_INTERVAL = 60  # Balance check interval seconds
 WAIT_FOR_BALANCE = True  # Balance à¶±à·à¶­à·’ à·€à·™à¶½à·à·€à¶§ crash à¶±à·œà·€à·“ wait à¶šà¶»à¶±à·Šà¶±
 
@@ -95,7 +112,7 @@ TAKE_PROFIT_PERCENT = 5.0      # 5% take profit (also the clamp-range base for a
 STOP_LOSS_PERCENT = 3.0        # 3% stop loss (also the clamp-range base for analysis-based SL)
 TRAILING_STOP_ACTIVATE = 0.5   # Activate trailing at 0.5% profit
 TRAILING_STOP_DISTANCE = 0.3   # Trailing stop distance 0.3%
-MAX_OPEN_TRADES = 10           # Maximum concurrent trades
+MAX_OPEN_TRADES = 15           # Maximum concurrent trades
 
 # FIX (TP1 -> TP2 continuation): the moment a trade's first take-profit
 # (TP1) is hit, instead of closing immediately, the bot re-analyzes that
