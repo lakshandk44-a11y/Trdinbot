@@ -483,11 +483,29 @@ class HackerAIBot:
                     min_chance = self.config.get("MIN_PROFIT_CHANCE", 65.0)
 
                     if tools_agreeing >= min_tools and profit_chance >= min_chance:
-                        self._execute_trade(symbol, decision, final, ohlc_data, analysis)
+                        if self._is_within_trading_hours():
+                            self._execute_trade(symbol, decision, final, ohlc_data, analysis)
+                        else:
+                            logger.info(f"⏱️ {symbol}: {decision} signal qualified but outside "
+                                        f"ALLOWED_TRADING_HOURS_UTC - skipping entry.")
 
             except Exception as e:
                 logger.error(f"Error scanning {symbol}: {e}")
                 continue
+
+    def _is_within_trading_hours(self) -> bool:
+        """
+        Gate for NEW trade entries only, based on hourly_breakdown.json
+        findings (see config.py comment above ALLOWED_TRADING_HOURS_UTC):
+        only 12:00-16:59 UTC cleared breakeven with statistically solid
+        sample sizes; every other hour was below it. Existing open trades
+        are never affected by this - it only decides whether a fresh
+        BUY/SELL signal is allowed to actually open a position right now.
+        """
+        if not self.config.get("TRADING_HOURS_FILTER_ENABLED", False):
+            return True
+        allowed_hours = self.config.get("ALLOWED_TRADING_HOURS_UTC", list(range(24)))
+        return datetime.utcnow().hour in allowed_hours
 
     def _fetch_multi_timeframe(self, symbol: str) -> Optional[Dict[str, pd.DataFrame]]:
         """Fetch OHLCV data for all 3 timeframes"""
@@ -527,24 +545,41 @@ class HackerAIBot:
         Derive TP/SL from the same analysis tools that triggered the trade,
         instead of a flat fixed percentage for every coin.
 
-        For a BUY: TP targets the nearest detected resistance ABOVE entry
+        For a BUY: TP targets the STRONGEST detected resistance ABOVE entry
         (a bearish order block, a bearish FVG's near edge, or an untapped
-        buyside liquidity pool); SL targets the nearest detected support
+        buyside liquidity pool); SL targets the STRONGEST detected support
         BELOW entry (mirror image, bullish versions). For a SELL it's the
         reverse. This uses the same order block / FVG / liquidity data the
         5 tools already compute — no new indicators are introduced.
 
-        CHANGE (per explicit request): the detected level is used AS-IS,
-        with no min/max clamp on the distance — whatever resistance/support
-        the analysis finds is exactly where TP/SL gets placed, however
-        close or far that is. Every candidate is still checked to be
-        strictly on the correct side of entry_price (a "resistance" behind
-        current price is useless). Returns (None, None) if no timeframe has
-        a usable level, so the caller falls back to the existing fixed-
-        percent (TAKE_PROFIT_PERCENT/STOP_LOSS_PERCENT) behavior exactly as
-        before — that fallback is unchanged.
+        CHANGE (per explicit request, round 2): candidate selection changed
+        from "nearest to entry" to "strongest" — previously the single
+        closest detected level was always used, which meant a minor/weak
+        structure sitting very close to entry could produce an
+        unreasonably tight SL that ordinary noise triggers, even though a
+        more significant (and often farther) level existed. Now every
+        candidate carries a strength score and the highest-strength one on
+        the correct side of entry is used, regardless of which is nearest.
+        Distance is still NOT clamped (previous change, unchanged) — the
+        strongest level is used exactly as found, however close or far
+        that turns out to be. Strength scoring:
+          - Order Block: the OB candle's displacement (high - low) — a
+            bigger impulse candle behind the level means more significant
+            institutional footprint.
+          - FVG: the gap's own size (already computed by _detect_fvg) —
+            bigger imbalance = more significant.
+          - Liquidity: a fixed weight reflecting ICT's own hierarchy of
+            significance (external swing-range liquidity > internal/EQH-EQL
+            liquidity), scaled by entry_price so it's comparable in the
+            same price-distance units as OB/FVG strength above.
+        Every candidate is still checked to be strictly on the correct side
+        of entry_price (a "resistance" behind current price is useless).
+        Returns (None, None) if no timeframe has a usable level, so the
+        caller falls back to the existing fixed-percent
+        (TAKE_PROFIT_PERCENT/STOP_LOSS_PERCENT) behavior exactly as before
+        — that fallback is unchanged.
         """
-        resistance_candidates = []
+        resistance_candidates = []  # list of (level, strength)
         support_candidates = []
 
         for tf_name in ["higher", "medium"]:
@@ -555,33 +590,37 @@ class HackerAIBot:
             ob = tf.get("order_block", {})
             bear_ob = ob.get("bearish_ob")
             if bear_ob and bear_ob.get("level"):
-                resistance_candidates.append(bear_ob["level"])
+                ob_strength = bear_ob.get("high", bear_ob["level"]) - bear_ob.get("low", bear_ob["level"])
+                resistance_candidates.append((bear_ob["level"], ob_strength))
             bull_ob = ob.get("bullish_ob")
             if bull_ob and bull_ob.get("level"):
-                support_candidates.append(bull_ob["level"])
+                ob_strength = bull_ob.get("high", bull_ob["level"]) - bull_ob.get("low", bull_ob["level"])
+                support_candidates.append((bull_ob["level"], ob_strength))
 
             for fvg in tf.get("fvg", {}).get("fvg_levels", []):
+                fvg_strength = fvg.get("size", 0)
                 if fvg.get("type") == "bearish" and fvg.get("low"):
-                    resistance_candidates.append(fvg["low"])
+                    resistance_candidates.append((fvg["low"], fvg_strength))
                 elif fvg.get("type") == "bullish" and fvg.get("high"):
-                    support_candidates.append(fvg["high"])
+                    support_candidates.append((fvg["high"], fvg_strength))
 
             liq = tf.get("liquidity", {})
+            liq_strength = entry_price * (0.01 if liq.get("external_swept") else 0.005)
             if liq.get("buyside_liquidity"):
-                resistance_candidates.append(liq["buyside_liquidity"])
+                resistance_candidates.append((liq["buyside_liquidity"], liq_strength))
             if liq.get("sellside_liquidity"):
-                support_candidates.append(liq["sellside_liquidity"])
+                support_candidates.append((liq["sellside_liquidity"], liq_strength))
 
         if side == "BUY":
-            tp_pool = [lvl for lvl in resistance_candidates if lvl > entry_price]
-            sl_pool = [lvl for lvl in support_candidates if lvl < entry_price]
-            tp_level = min(tp_pool) if tp_pool else None   # nearest resistance above
-            sl_level = max(sl_pool) if sl_pool else None   # nearest support below
+            tp_pool = [(lvl, s) for lvl, s in resistance_candidates if lvl > entry_price]
+            sl_pool = [(lvl, s) for lvl, s in support_candidates if lvl < entry_price]
+            tp_level = max(tp_pool, key=lambda x: x[1])[0] if tp_pool else None   # strongest resistance above
+            sl_level = max(sl_pool, key=lambda x: x[1])[0] if sl_pool else None   # strongest support below
         else:
-            tp_pool = [lvl for lvl in support_candidates if lvl < entry_price]
-            sl_pool = [lvl for lvl in resistance_candidates if lvl > entry_price]
-            tp_level = max(tp_pool) if tp_pool else None   # nearest support below
-            sl_level = min(sl_pool) if sl_pool else None   # nearest resistance above
+            tp_pool = [(lvl, s) for lvl, s in support_candidates if lvl < entry_price]
+            sl_pool = [(lvl, s) for lvl, s in resistance_candidates if lvl > entry_price]
+            tp_level = max(tp_pool, key=lambda x: x[1])[0] if tp_pool else None   # strongest support below
+            sl_level = max(sl_pool, key=lambda x: x[1])[0] if sl_pool else None   # strongest resistance above
 
         return tp_level, sl_level
 
