@@ -6,6 +6,7 @@ Auto Leverage | Auto Min Notional Check
 
 import logging
 import time
+import os
 import hashlib
 import hmac
 import requests
@@ -1050,6 +1051,31 @@ class HackerAIBot:
                     f"Open: {len(open_trades)} | "
                     f"Total PnL: ${total_pnl:.2f} | "
                     f"Win Rate: {win_rate:.1f}% ({wins}/{closed_count})")
+
+        # FIX (rate-limit-free dashboard support): write the SAME status
+        # this function already logs to a small local file, so a separate
+        # dashboard/backend process can read live balance/PnL/win-rate from
+        # disk instead of calling Binance's API itself. This adds ZERO
+        # extra Binance API calls - self.balance and trade_manager's data
+        # are already being fetched/maintained by the bot for its own
+        # trading logic; we're just also writing them out. Atomic write
+        # (tmp + rename), same pattern as trade_manager._save_state.
+        try:
+            status_data = {
+                "updated_at": datetime.now().isoformat(),
+                "balance": self.balance,
+                "open_count": len(open_trades),
+                "total_pnl": total_pnl,
+                "win_rate": win_rate,
+                "wins": wins,
+                "closed_count": closed_count,
+            }
+            tmp_path = "live_status.json.tmp"
+            with open(tmp_path, "w") as f:
+                json.dump(status_data, f, indent=2, default=str)
+            os.replace(tmp_path, "live_status.json")
+        except Exception as e:
+            logger.error(f"⚠️ Failed to write live_status.json: {e}")
 
         if self.waiting_for_balance:
             logger.info("⏳ Waiting for funds to be deposited...")
