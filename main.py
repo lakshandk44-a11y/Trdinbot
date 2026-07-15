@@ -148,29 +148,19 @@ def main():
 
     run_calibration_if_needed(logger)
 
-    bot_config = {
-        "BINANCE_API_KEY": BINANCE_API_KEY,
-        "BINANCE_API_SECRET": BINANCE_API_SECRET,
-        "BINANCE_TESTNET": BINANCE_TESTNET,
-        "BALANCE_PERCENTAGE": BALANCE_PERCENTAGE,
-        "MAX_LEVERAGE": MAX_LEVERAGE,
-        "RISK_PER_TRADE": RISK_PER_TRADE,
-        "MIN_TOOLS_MATCH": MIN_TOOLS_MATCH,
-        "MIN_PROFIT_CHANCE": MIN_PROFIT_CHANCE,
-        "SCAN_INTERVAL_SECONDS": SCAN_INTERVAL_SECONDS,
-        "BALANCE_CHECK_INTERVAL": BALANCE_CHECK_INTERVAL,
-        "TOP_40_COINS": TOP_40_COINS,
-        "TIMEFRAMES": TIMEFRAMES,
-        "ANALYSIS_TOOLS": ANALYSIS_TOOLS,
-        "NEWS_API_KEY": NEWS_API_KEY,
-        "TAKE_PROFIT_PERCENT": TAKE_PROFIT_PERCENT,
-        "STOP_LOSS_PERCENT": STOP_LOSS_PERCENT,
-        "TRAILING_STOP_ACTIVATE": TRAILING_STOP_ACTIVATE,
-        "TRAILING_STOP_DISTANCE": TRAILING_STOP_DISTANCE,
-        "MAX_OPEN_TRADES": MAX_OPEN_TRADES,
-        "TRADE_STATE_FILE": TRADE_STATE_FILE,
-        "TRADING_FEE_PERCENT": TRADING_FEE_PERCENT
-    }
+    # FIX (critical config-passthrough bug): previously this was a manually
+    # maintained dict listing individual config keys - easy to forget to
+    # update when a new setting is added to config.py, which is exactly
+    # what happened: TP1_REANALYSIS_ENABLED, TRADING_HOURS_FILTER_ENABLED,
+    # and ALLOWED_TRADING_HOURS_UTC were all set correctly in config.py but
+    # never reached bot_core.py/trade_manager.py, so those features were
+    # silently running on their internal fallback defaults (False) instead
+    # of the real configured values. Building this from config's own
+    # namespace (every UPPERCASE name) means every current AND future
+    # config.py setting is passed through automatically - nothing to
+    # remember to add here again.
+    import config as _config_module
+    bot_config = {k: v for k, v in vars(_config_module).items() if k.isupper()}
     
     # PM2 mode - auto restart on crash
     while True:
