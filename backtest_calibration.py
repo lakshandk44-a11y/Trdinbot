@@ -171,7 +171,8 @@ def fetch_full_history(client: BinanceFuturesClient, symbol: str, interval: str,
             )
         except Exception as e:
             logger.warning(f"{symbol} {interval}: klines request failed at cursor={cursor}: {e}")
-            break
+            break  # FIX (partial-history discard bug): break, don't return None -
+            # whatever was already collected in all_rows is still used below.
 
         # FIX ('backtest failed: -1' bug, round 2): the known -1121-style
         # error dict is handled below, but ANY other unexpected response
@@ -195,7 +196,27 @@ def fetch_full_history(client: BinanceFuturesClient, symbol: str, interval: str,
             # the pagination loop - which surfaced up in main() as the
             # unhelpful "{symbol}: backtest failed: -1" message. Now it's
             # detected immediately and skipped with a clear reason instead.
+            #
+            # FIX (partial-history discard bug): confirmed via web search that
+            # BATUSDT/AVAXUSDT/ICPUSDT are all still valid, actively-traded
+            # Binance Futures symbols (not delisted/renamed) - yet they were
+            # showing up as "incomplete history, skipping". The real cause:
+            # if a LATER page (e.g. month 7 of 9) hit a persistent rate-limit
+            # ban that outlasted klines_with_ban_handling's retries, this
+            # branch fired and discarded ALL already-collected months of
+            # good data via `return None`, even though the symbol/data were
+            # completely fine. Now: if we already have SOME rows, we keep
+            # them (break out and use what we've got) instead of throwing
+            # everything away. Only a symbol that fails on its very FIRST
+            # page (all_rows still empty - the real "invalid symbol" case,
+            # like the old plain SHIBUSDT) still results in None.
             if isinstance(batch, dict):
+                if all_rows:
+                    logger.warning(f"{symbol} {interval}: Binance returned an error "
+                                    f"(code={batch.get('code')}, msg={batch.get('msg')}) after already "
+                                    f"collecting {len(all_rows)} candles - using partial history instead "
+                                    f"of discarding it.")
+                    break
                 logger.warning(f"{symbol} {interval}: Binance returned an error instead of candles "
                                 f"(code={batch.get('code')}, msg={batch.get('msg')}) - symbol is "
                                 f"likely invalid/delisted/renamed on Futures. Skipping this symbol.")
@@ -215,6 +236,11 @@ def fetch_full_history(client: BinanceFuturesClient, symbol: str, interval: str,
             if len(batch) < 1500:
                 break  # short batch means we've caught up to "now"
         except Exception as e:
+            if all_rows:
+                logger.warning(f"{symbol} {interval}: unexpected response shape after already "
+                                f"collecting {len(all_rows)} candles ({e!r}) - using partial history "
+                                f"instead of discarding it.")
+                break
             logger.warning(f"{symbol} {interval}: unexpected response shape while paginating "
                             f"(type={type(batch).__name__}, sample={str(batch)[:200]!r}) - {e!r}. "
                             f"Skipping this symbol.")
