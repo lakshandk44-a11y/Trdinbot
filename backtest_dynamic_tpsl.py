@@ -60,33 +60,26 @@ OUTPUT_FILE = "dynamic_tpsl_backtest_report.json"
 
 LOOKBACK_LIMIT = {"higher": 100, "medium": 150, "lower": 200}
 FORWARD_LOOKAHEAD_CANDLES = 200  # 200 * 15m = ~50 hours
-STRIDE = 3  # evaluate every 3rd medium-timeframe candle, same as calibration
-
-# Same clamp bounds as bot_core._get_analysis_based_tp_sl - kept identical
-# on purpose so this backtest reflects exactly what the live bot would do.
-CLAMP_MIN_MULT = 0.5
-CLAMP_MAX_MULT = 3.0
+STRIDE = 1  # FIX: was 3 - matches backtest_calibration.py's STRIDE=1 fix (full coverage, not every-3rd-candle)
 
 
 def get_dynamic_tp_sl(side: str, entry_price: float, analysis: Dict) -> Tuple[Optional[float], Optional[float]]:
     """
-    Mirrors bot_core.HackerAIBot._get_analysis_based_tp_sl() exactly (same
-    candidate levels, same nearest-level selection, same clamp bounds) so
-    this backtest measures precisely what the live bot would have done.
+    Mirrors bot_core.HackerAIBot._get_analysis_based_tp_sl() exactly - same
+    candidate levels, same STRENGTH-based selection, NO clamp - so this
+    backtest measures precisely what the live bot would have done.
+
+    FIX (sync with live bot): this used to select the NEAREST candidate
+    level and clamp the distance to [0.5x, 3x] of the fixed %, which is
+    what the live bot's TP/SL logic ALSO used to do - but the live bot was
+    later changed (per explicit request) to (1) drop the clamp entirely,
+    using the detected level exactly as-is, and (2) select the STRONGEST
+    candidate (by OB displacement / FVG size / liquidity-type weight)
+    instead of the nearest one. This function had fallen out of sync with
+    that change, silently backtesting a version of "dynamic TP/SL" the
+    live bot no longer actually runs.
     """
-    tp_percent = TAKE_PROFIT_PERCENT / 100
-    sl_percent = STOP_LOSS_PERCENT / 100
-
-    def clamp(level: float, base_percent: float, is_tp: bool) -> float:
-        distance = abs(level - entry_price)
-        min_dist = entry_price * base_percent * CLAMP_MIN_MULT
-        max_dist = entry_price * base_percent * CLAMP_MAX_MULT
-        distance = max(min_dist, min(distance, max_dist))
-        if (side == "BUY" and is_tp) or (side == "SELL" and not is_tp):
-            return entry_price + distance
-        return entry_price - distance
-
-    resistance_candidates = []
+    resistance_candidates = []  # list of (level, strength)
     support_candidates = []
 
     for tf_name in ["higher", "medium"]:
@@ -97,37 +90,39 @@ def get_dynamic_tp_sl(side: str, entry_price: float, analysis: Dict) -> Tuple[Op
         ob = tf.get("order_block", {})
         bear_ob = ob.get("bearish_ob")
         if bear_ob and bear_ob.get("level"):
-            resistance_candidates.append(bear_ob["level"])
+            ob_strength = bear_ob.get("high", bear_ob["level"]) - bear_ob.get("low", bear_ob["level"])
+            resistance_candidates.append((bear_ob["level"], ob_strength))
         bull_ob = ob.get("bullish_ob")
         if bull_ob and bull_ob.get("level"):
-            support_candidates.append(bull_ob["level"])
+            ob_strength = bull_ob.get("high", bull_ob["level"]) - bull_ob.get("low", bull_ob["level"])
+            support_candidates.append((bull_ob["level"], ob_strength))
 
         for fvg in tf.get("fvg", {}).get("fvg_levels", []):
+            fvg_strength = fvg.get("size", 0)
             if fvg.get("type") == "bearish" and fvg.get("low"):
-                resistance_candidates.append(fvg["low"])
+                resistance_candidates.append((fvg["low"], fvg_strength))
             elif fvg.get("type") == "bullish" and fvg.get("high"):
-                support_candidates.append(fvg["high"])
+                support_candidates.append((fvg["high"], fvg_strength))
 
         liq = tf.get("liquidity", {})
+        liq_strength = entry_price * (0.01 if liq.get("external_swept") else 0.005)
         if liq.get("buyside_liquidity"):
-            resistance_candidates.append(liq["buyside_liquidity"])
+            resistance_candidates.append((liq["buyside_liquidity"], liq_strength))
         if liq.get("sellside_liquidity"):
-            support_candidates.append(liq["sellside_liquidity"])
+            support_candidates.append((liq["sellside_liquidity"], liq_strength))
 
     if side == "BUY":
-        tp_pool = [lvl for lvl in resistance_candidates if lvl > entry_price]
-        sl_pool = [lvl for lvl in support_candidates if lvl < entry_price]
-        tp_level = min(tp_pool) if tp_pool else None
-        sl_level = max(sl_pool) if sl_pool else None
+        tp_pool = [(lvl, s) for lvl, s in resistance_candidates if lvl > entry_price]
+        sl_pool = [(lvl, s) for lvl, s in support_candidates if lvl < entry_price]
+        tp_level = max(tp_pool, key=lambda x: x[1])[0] if tp_pool else None
+        sl_level = max(sl_pool, key=lambda x: x[1])[0] if sl_pool else None
     else:
-        tp_pool = [lvl for lvl in support_candidates if lvl < entry_price]
-        sl_pool = [lvl for lvl in resistance_candidates if lvl > entry_price]
-        tp_level = max(tp_pool) if tp_pool else None
-        sl_level = min(sl_pool) if sl_pool else None
+        tp_pool = [(lvl, s) for lvl, s in support_candidates if lvl < entry_price]
+        sl_pool = [(lvl, s) for lvl, s in resistance_candidates if lvl > entry_price]
+        tp_level = max(tp_pool, key=lambda x: x[1])[0] if tp_pool else None
+        sl_level = max(sl_pool, key=lambda x: x[1])[0] if sl_pool else None
 
-    final_tp = clamp(tp_level, tp_percent, is_tp=True) if tp_level is not None else None
-    final_sl = clamp(sl_level, sl_percent, is_tp=False) if sl_level is not None else None
-    return final_tp, final_sl
+    return tp_level, sl_level
 
 
 def simulate_outcome_at_prices(lower_df: pd.DataFrame, entry_idx: int, direction: str,
