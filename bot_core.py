@@ -378,8 +378,12 @@ class HackerAIBot:
                 # Update open trades
                 self._update_open_trades()
 
-                # Check reversals
-                self._check_trade_reversals()
+                # REMOVED (per explicit request): reversal-signal mid-trade
+                # close. Trades now ONLY close via STOP_LOSS, TAKE_PROFIT,
+                # or the trailing stop - never because a fresh analysis
+                # scan flipped direction on an already-open trade. See
+                # _check_trade_reversals() below, kept but no longer
+                # called, in case this is ever wanted back.
 
                 # Log status every 10 scans
                 if self.scan_count % 10 == 0:
@@ -781,6 +785,15 @@ class HackerAIBot:
                         f"Qty={quantity} | Lev={final_leverage}x | "
                         f"Pos=${final_position:.2f} | Margin=${margin:.2f}")
 
+            # FIX (trailing stop redesign): capture ATR(14) at entry so the
+            # trailing stop distance can adapt to THIS coin's actual
+            # volatility instead of using one fixed % for all 40 coins
+            # (see trade_manager._evaluate_trade for how this is used).
+            entry_atr = None
+            if analysis:
+                entry_atr = (analysis.get("lower", {}).get("fvg", {}).get("atr")
+                             or analysis.get("medium", {}).get("fvg", {}).get("atr"))
+
             trade = self.trade_manager.open_new_trade(
                 symbol=symbol,
                 side=side,
@@ -795,6 +808,7 @@ class HackerAIBot:
                     "margin_used": margin,
                     "position_value": final_position,
                     "min_notional": coin_min_notional,
+                    "entry_atr": entry_atr,
                 },
                 dynamic_tp=dynamic_tp,
                 dynamic_sl=dynamic_sl
