@@ -680,38 +680,41 @@ class TradeManager:
             self._close_trade(trade["symbol"], "STOP_LOSS")
             return
         
-        # FIX (trailing stop should only trail after an analysis-confirmed
-        # TP1 continuation, per explicit request): previously this simple
-        # %-based trailing activated the instant price moved
-        # TRAILING_STOP_ACTIVATE (0.5%) in the trade's favor, regardless of
-        # whether TP1 had ever been reached or whether the market had been
-        # re-analyzed at all — it was pure price-following, no analysis
-        # involved. Now it only runs once trade["tp_stage"] >= 2, which
-        # ONLY happens via _maybe_extend_to_tp2() confirming continuation
-        # with a fresh multi-timeframe analysis at the exact moment TP1 was
-        # hit (same tools/MIN_TOOLS_MATCH bar as an entry). Before that
-        # point, the trade's SL stays exactly at its original
-        # analysis-derived (or fallback %) level - no price-based trailing
-        # occurs pre-TP1. After tp_stage reaches 2, the profit up to TP1 is
-        # already locked in by that same analysis-confirmed extension (SL
-        # moved to the TP1 price), and this simple trailing then continues
-        # tightening the stop further as price extends into the TP2 leg.
-        if trade.get("tp_stage", 1) < 2:
-            return
-
-        # Trailing Stop
+        # REDESIGN (trailing stop, per explicit request): reverted the
+        # tp_stage>=2 gate - trailing is active from trade open again, not
+        # only after an analysis-confirmed TP1 continuation. To do this
+        # well rather than just reverting to the old behavior verbatim,
+        # the trailing DISTANCE is now based on this coin's own ATR(14)
+        # (captured at entry, see bot_core._execute_trade) instead of one
+        # fixed TRAILING_STOP_DISTANCE % applied identically to all 40
+        # coins. This is the actual fix for what happened with AIOUSDT
+        # earlier: a fixed 0.3% is tight for a volatile coin's normal
+        # noise and loose for a calm one, so the same % stops out
+        # differently-behaved coins very inconsistently. An ATR-based
+        # distance ("Chandelier Exit" style, common in professional
+        # trend-following systems) scales the stop to each coin's actual
+        # typical price movement instead. Falls back to the fixed % only
+        # if ATR wasn't captured for this trade (e.g. analysis lacked it).
         activate_pct = self.config.get("TRAILING_STOP_ACTIVATE", 0.5) / 100
-        trail_dist = self.config.get("TRAILING_STOP_DISTANCE", 0.3) / 100
-        
+        entry_atr = trade.get("analysis", {}).get("entry_atr")
+        atr_multiplier = self.config.get("ATR_TRAILING_MULTIPLIER", 2.0)
+
+        if entry_atr:
+            trail_distance_price = entry_atr * atr_multiplier
+        else:
+            fallback_pct = self.config.get("TRAILING_STOP_DISTANCE", 0.3) / 100
+            trail_distance_price = trade["entry_price"] * fallback_pct
+
         if side == "BUY":
             pnl = (current_price - trade["entry_price"]) / trade["entry_price"]
             
             if pnl >= activate_pct and not trade["trailing_activated"]:
                 trade["trailing_activated"] = True
-                logger.info(f"🔺 Trailing ON: {trade['symbol']} @ {pnl*100:.2f}%")
+                logger.info(f"🔺 Trailing ON: {trade['symbol']} @ {pnl*100:.2f}% "
+                            f"(ATR-based distance: {trail_distance_price:.8f})")
             
             if trade["trailing_activated"] and trade["highest_price"]:
-                new_sl = trade["highest_price"] * (1 - trail_dist)
+                new_sl = trade["highest_price"] - trail_distance_price
                 if new_sl > trade["stop_loss"]:
                     self._update_trailing_stop_order(trade["symbol"], trade, new_sl)
         
@@ -720,10 +723,11 @@ class TradeManager:
             
             if pnl >= activate_pct and not trade["trailing_activated"]:
                 trade["trailing_activated"] = True
-                logger.info(f"🔻 Trailing ON: {trade['symbol']} @ {pnl*100:.2f}%")
+                logger.info(f"🔻 Trailing ON: {trade['symbol']} @ {pnl*100:.2f}% "
+                            f"(ATR-based distance: {trail_distance_price:.8f})")
             
             if trade["trailing_activated"] and trade["lowest_price"]:
-                new_sl = trade["lowest_price"] * (1 + trail_dist)
+                new_sl = trade["lowest_price"] + trail_distance_price
                 if new_sl < trade["stop_loss"]:
                     self._update_trailing_stop_order(trade["symbol"], trade, new_sl)
     
