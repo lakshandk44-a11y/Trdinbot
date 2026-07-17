@@ -1166,7 +1166,21 @@ class AnalysisEngine:
         - Medium TF (1h): 30% weight  
         - Lower TF (15m): 20% weight
         
-        Tools 5/3 rule applied per timeframe AND overall
+        FIX (tools-agreeing bug): the "5/3 rule" is meant per-timeframe -
+        each of the 3 timeframes (4h/1h/15m) should independently have at
+        least MIN_TOOLS_MATCH of its own 5 tools agreeing, in the SAME
+        direction. The previous version summed each timeframe's 0-5 count
+        together (max possible 15) and compared that SUM to MIN_TOOLS_MATCH
+        (3) - so e.g. 4h=1, 1h=1, 15m=1 (weak on every single timeframe)
+        summed to 3 and passed, even though not one timeframe actually hit
+        the intended 3-out-of-5 bar. In practice this meant the tools
+        check almost never blocked anything (real coins were showing
+        summed values of 8-11 against a threshold of 3).
+        Now: ALL 3 timeframes must independently have >= MIN_TOOLS_MATCH
+        bullish_tools (for BUY) or bearish_tools (for SELL). tools_agreeing
+        reports the weakest (minimum) of the 3 timeframes' counts, since
+        that's what actually determines pass/fail - directly comparable to
+        MIN_TOOLS_MATCH on the intended 0-5 scale.
         """
         weights = {
             "higher": 0.50,
@@ -1177,7 +1191,6 @@ class AnalysisEngine:
         min_tools = self.config.get("MIN_TOOLS_MATCH", 3)
         
         weighted_signal = 0
-        total_tools_count = 0
         total_bullish = 0
         total_bearish = 0
         
@@ -1191,12 +1204,17 @@ class AnalysisEngine:
                 
                 total_bullish += bullish_t
                 total_bearish += bearish_t
-                total_tools_count += mtf_results[tf_name].get("tools_agreeing", 0)
                 
                 weighted_signal += sig * weight * (conf * 0.4 + profit/100 * 0.6)
         
-        # Overall tools count
-        overall_agreeing = max(total_bullish, total_bearish)
+        # FIX (tools-agreeing bug): each timeframe must independently clear
+        # min_tools in the same direction - the weakest timeframe is the
+        # binding constraint, not the sum of all three.
+        tf_names = ["higher", "medium", "lower"]
+        min_bullish_across_tf = min(mtf_results.get(tf, {}).get("bullish_tools", 0) for tf in tf_names)
+        min_bearish_across_tf = min(mtf_results.get(tf, {}).get("bearish_tools", 0) for tf in tf_names)
+        all_tf_bullish_ok = min_bullish_across_tf >= min_tools
+        all_tf_bearish_ok = min_bearish_across_tf >= min_tools
         
         # Calculate overall profit chance
         avg_profit_chance = np.mean([
@@ -1209,12 +1227,17 @@ class AnalysisEngine:
         if news_sentiment != 0:
             weighted_signal += news_sentiment * 0.1
         
-        if overall_agreeing >= min_tools and weighted_signal >= 0.3:
+        if all_tf_bullish_ok and weighted_signal >= 0.3:
             decision = "BUY"
-        elif overall_agreeing >= min_tools and weighted_signal <= -0.3:
+            overall_agreeing = min_bullish_across_tf
+        elif all_tf_bearish_ok and weighted_signal <= -0.3:
             decision = "SELL"
+            overall_agreeing = min_bearish_across_tf
         else:
             decision = "HOLD"
+            # Still report the more-relevant of the two so the diagnostic
+            # log shows how close a HOLD was to qualifying either way.
+            overall_agreeing = max(min_bullish_across_tf, min_bearish_across_tf)
         
         return {
             "decision": decision,
