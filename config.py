@@ -53,7 +53,13 @@ SCAN_INTERVAL_SECONDS = 30  # à·ƒà·‘à¶¸ à¶­à¶­à·Š 30à¶šà�
 # untouched; this only gates new entries). Re-verify against a fresh
 # hourly_breakdown.json periodically, since this reflects one backtest
 # window, not a permanent law of the market.
-TRADING_HOURS_FILTER_ENABLED = True
+TRADING_HOURS_FILTER_ENABLED = False  # TEMPORARILY disabled for diagnostic testing -
+# zero trades opened for an extended period with this on. 5/24 allowed
+# hours combined with the 45% calibrated MIN_PROFIT_CHANCE may simply be
+# too restrictive together. Re-enable (set back to True) once confirmed
+# trades open normally without this filter - if they do, the hours filter
+# was the cause (just very strict, not a bug); if trades still don't open,
+# the cause is elsewhere and this rules the hours filter out.
 ALLOWED_TRADING_HOURS_UTC = [12, 13, 14, 15, 16]
 BALANCE_CHECK_INTERVAL = 60  # Balance check interval seconds
 WAIT_FOR_BALANCE = True  # Balance à¶±à·à¶­à·’ à·€à·™à¶½à·à·€à¶§ crash à¶±à·œà·€à·“ wait à¶šà¶»à¶±à·Šà¶±
