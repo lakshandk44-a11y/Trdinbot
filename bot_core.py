@@ -487,6 +487,17 @@ class HackerAIBot:
                     profit_chance = final.get("profit_chance", 0.0)
                     min_chance = self.config.get("MIN_PROFIT_CHANCE", 65.0)
 
+                    # DIAGNOSTIC (per explicit request): log every BUY/SELL
+                    # candidate's actual numbers, whether it passes or not -
+                    # so a rejected coin shows exactly WHY (tools too few,
+                    # score too low, or both) instead of just silently not
+                    # trading with no visible reason.
+                    passed = tools_agreeing >= min_tools and profit_chance >= min_chance
+                    logger.info(f"📈 {symbol}: {decision} candidate | "
+                                f"tools_agreeing={tools_agreeing}/{min_tools} | "
+                                f"profit_chance={profit_chance:.1f}%/{min_chance:.1f}% | "
+                                f"{'✅ PASSED' if passed else '❌ rejected'}")
+
                     if tools_agreeing >= min_tools and profit_chance >= min_chance:
                         if self._is_within_trading_hours():
                             self._execute_trade(symbol, decision, final, ohlc_data, analysis)
