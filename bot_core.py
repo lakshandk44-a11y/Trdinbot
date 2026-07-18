@@ -17,6 +17,14 @@ import pandas as pd
 import numpy as np
 from decimal import Decimal, ROUND_DOWN
 
+# Optional WhatsApp notifications (per explicit request) - if unavailable
+# for any reason, the bot must keep working exactly as before.
+try:
+    from whatsapp_notify import send_whatsapp, format_tp1_hit, format_tp1_extended, format_tp1_closed
+    _WHATSAPP_AVAILABLE = True
+except Exception:
+    _WHATSAPP_AVAILABLE = False
+
 from config import *
 from analysis_engine import AnalysisEngine
 from trade_manager import TradeManager
@@ -997,12 +1005,22 @@ class HackerAIBot:
 
         logger.info(f"🎯 [{symbol}] TP1 HIT — re-analyzing market before deciding "
                     f"whether to close here or extend toward TP2...")
+        if _WHATSAPP_AVAILABLE:
+            try:
+                send_whatsapp(format_tp1_hit(symbol))
+            except Exception as e:
+                logger.warning(f"WhatsApp notify (TP1 hit) failed: {e}")
 
         side = trade["side"]
         wants_continue = (side == "BUY" and direction == 1) or (side == "SELL" and direction == -1)
         if not wants_continue or tools_agreeing < min_tools:
             logger.info(f"❌ [{symbol}] Fresh analysis does NOT confirm continuation "
                         f"({tools_agreeing}/{min_tools} tools) — closing at TP1, profit locked.")
+            if _WHATSAPP_AVAILABLE:
+                try:
+                    send_whatsapp(format_tp1_closed(symbol, tools_agreeing, min_tools))
+                except Exception as e:
+                    logger.warning(f"WhatsApp notify (TP1 closed) failed: {e}")
             return None  # market doesn't confirm continuation -> close at TP1, unchanged
 
         tp1_level = trade["take_profit"]
@@ -1024,6 +1042,11 @@ class HackerAIBot:
                     f"extending to TP2.")
         logger.info(f"   New Stop Loss: {new_sl:.8f} (was TP1 — profit now locked, can't go back to loss)")
         logger.info(f"   New Take Profit (TP2): {new_tp:.8f}")
+        if _WHATSAPP_AVAILABLE:
+            try:
+                send_whatsapp(format_tp1_extended(symbol, tools_agreeing, min_tools, new_sl, new_tp))
+            except Exception as e:
+                logger.warning(f"WhatsApp notify (TP1 extended) failed: {e}")
 
         return {"extend": True, "new_sl": new_sl, "new_tp": new_tp}
 
