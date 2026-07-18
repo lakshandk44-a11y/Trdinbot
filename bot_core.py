@@ -995,9 +995,14 @@ class HackerAIBot:
         tools_agreeing = final.get("tools_agreeing", 0)
         min_tools = self.config.get("MIN_TOOLS_MATCH", 3)
 
+        logger.info(f"🎯 [{symbol}] TP1 HIT — re-analyzing market before deciding "
+                    f"whether to close here or extend toward TP2...")
+
         side = trade["side"]
         wants_continue = (side == "BUY" and direction == 1) or (side == "SELL" and direction == -1)
         if not wants_continue or tools_agreeing < min_tools:
+            logger.info(f"❌ [{symbol}] Fresh analysis does NOT confirm continuation "
+                        f"({tools_agreeing}/{min_tools} tools) — closing at TP1, profit locked.")
             return None  # market doesn't confirm continuation -> close at TP1, unchanged
 
         tp1_level = trade["take_profit"]
@@ -1015,8 +1020,10 @@ class HackerAIBot:
 
         new_sl = tp1_level  # lock in the TP1-level profit as the new stop
 
-        logger.info(f"🧠 {symbol}: TP1 hit, fresh analysis confirms continuation "
-                    f"({tools_agreeing}/{min_tools} tools) — requesting extension to TP2.")
+        logger.info(f"✅ [{symbol}] Continuation CONFIRMED ({tools_agreeing}/{min_tools} tools) — "
+                    f"extending to TP2.")
+        logger.info(f"   New Stop Loss: {new_sl:.8f} (was TP1 — profit now locked, can't go back to loss)")
+        logger.info(f"   New Take Profit (TP2): {new_tp:.8f}")
 
         return {"extend": True, "new_sl": new_sl, "new_tp": new_tp}
 
@@ -1106,15 +1113,19 @@ class HackerAIBot:
             logger.info("⏳ Waiting for funds to be deposited...")
 
         for sym, trade in open_trades.items():
-            logger.info(f"   {sym}: {trade['side']} | "
-                        f"PnL: {trade['pnl_percent']:.2f}% | "
-                        f"Entry: {trade['entry_price']:.8f}")
+            pnl_icon = "🟢" if trade["pnl_percent"] >= 0 else "🔴"
+            trailing_note = " (trailing active)" if trade.get("trailing_activated") else ""
+            logger.info(f"   {pnl_icon} [{sym}] {trade['side']} | PnL: {trade['pnl_percent']:+.2f}% | "
+                        f"Entry: {trade['entry_price']:.8f} | SL: {trade['stop_loss']:.8f} | "
+                        f"TP: {trade['take_profit']:.8f}{trailing_note}")
 
         if self.trade_manager.trade_history:
             recent = self.trade_manager.trade_history[-3:]
+            logger.info(f"   📋 Last {len(recent)} closed trades:")
             for t in recent:
-                logger.info(f"   📋 Closed: {t['symbol']} {t['side']} | "
-                            f"PnL: {t['pnl_percent']:.2f}% | "
+                icon = "🟢" if t['pnl_percent'] >= 0 else "🔴"
+                logger.info(f"      {icon} [{t['symbol']}] {t['side']} | "
+                            f"PnL: {t['pnl_percent']:+.2f}% | "
                             f"Reason: {t.get('close_reason', 'N/A')}")
 
         logger.info(f"═══════════════════════════════════════")
