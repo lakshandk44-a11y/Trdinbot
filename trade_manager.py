@@ -12,6 +12,16 @@ from typing import Dict, List, Optional
 from datetime import datetime
 from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
 
+# Optional WhatsApp notifications (per explicit request) - if this module
+# or its dependency (requests) isn't available for any reason, the bot
+# must keep working exactly as before with notifications simply disabled.
+try:
+    from whatsapp_notify import (send_whatsapp, format_trade_opened, format_trade_closed,
+                                  format_trailing_activated, format_trailing_moved)
+    _WHATSAPP_AVAILABLE = True
+except Exception:
+    _WHATSAPP_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 class TradeManager:
@@ -403,6 +413,12 @@ class TradeManager:
         logger.info(f"🔺 [{symbol}] Stop Loss moved to {new_sl_price:.8f} "
                     f"(if hit now, locks in {locked_pnl_pct:+.2f}% profit)")
 
+        if _WHATSAPP_AVAILABLE:
+            try:
+                send_whatsapp(format_trailing_moved(symbol, new_sl_price, locked_pnl_pct))
+            except Exception as e:
+                logger.warning(f"WhatsApp notify (trailing move) failed: {e}")
+
         try:
             if old_order_id:
                 self.client.cancel_order(symbol=symbol, orderId=old_order_id)
@@ -547,6 +563,14 @@ class TradeManager:
         logger.info(f"│  Side: {side}  |  Entry: {entry_price:.8f}  |  Qty: {quantity}  |  Leverage: {leverage}x")
         logger.info(f"│  Take Profit: {take_profit:.8f}   Stop Loss: {stop_loss:.8f}")
         logger.info(f"└─────────────────────────────────────────────────")
+
+        # WhatsApp notification (per explicit request) - fire-and-forget,
+        # never affects the trade itself even if this fails entirely.
+        if _WHATSAPP_AVAILABLE:
+            try:
+                send_whatsapp(format_trade_opened(trade))
+            except Exception as e:
+                logger.warning(f"WhatsApp notify (open) failed: {e}")
 
         self._save_state()
 
@@ -718,6 +742,11 @@ class TradeManager:
                 logger.info(f"🔺 [{trade['symbol']}] Trailing Stop ACTIVATED — profit is now "
                             f"+{pnl*100:.2f}%, SL will follow the price up from here "
                             f"(distance: {trail_distance_price:.8f})")
+                if _WHATSAPP_AVAILABLE:
+                    try:
+                        send_whatsapp(format_trailing_activated(trade["symbol"], side, pnl * 100))
+                    except Exception as e:
+                        logger.warning(f"WhatsApp notify (trailing activated) failed: {e}")
             
             if trade["trailing_activated"] and trade["highest_price"]:
                 new_sl = trade["highest_price"] - trail_distance_price
@@ -732,6 +761,11 @@ class TradeManager:
                 logger.info(f"🔻 [{trade['symbol']}] Trailing Stop ACTIVATED — profit is now "
                             f"+{pnl*100:.2f}%, SL will follow the price down from here "
                             f"(distance: {trail_distance_price:.8f})")
+                if _WHATSAPP_AVAILABLE:
+                    try:
+                        send_whatsapp(format_trailing_activated(trade["symbol"], side, pnl * 100))
+                    except Exception as e:
+                        logger.warning(f"WhatsApp notify (trailing activated) failed: {e}")
             
             if trade["trailing_activated"] and trade["lowest_price"]:
                 new_sl = trade["lowest_price"] + trail_distance_price
@@ -882,6 +916,14 @@ class TradeManager:
         logger.info(f"│  Result: {result_word} {trade['pnl_percent']:+.2f}%  |  Reason: {reason}{exchange_note}")
         logger.info(f"│  Entry: {trade['entry_price']:.8f}   Exit: {trade['close_price']:.8f}   Duration: {duration}s")
         logger.info(f"└─────────────────────────────────────────────────")
+
+        # WhatsApp notification (per explicit request) - fire-and-forget,
+        # never affects trade state or the save below even if this fails.
+        if _WHATSAPP_AVAILABLE:
+            try:
+                send_whatsapp(format_trade_closed(trade))
+            except Exception as e:
+                logger.warning(f"WhatsApp notify (close) failed: {e}")
 
         self._save_state()
     
