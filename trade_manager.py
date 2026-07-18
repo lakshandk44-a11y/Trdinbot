@@ -397,7 +397,11 @@ class TradeManager:
 
         trade["sl_order_id"] = new_order.get("orderId")
         trade["_last_exchange_sl"] = new_sl_price
-        logger.info(f"🔺 Exchange trailing stop moved: {symbol} @ {new_sl_price:.8f}")
+        locked_pnl_pct = ((new_sl_price - trade["entry_price"]) / trade["entry_price"] * 100
+                           if trade["side"] == "BUY"
+                           else (trade["entry_price"] - new_sl_price) / trade["entry_price"] * 100)
+        logger.info(f"🔺 [{symbol}] Stop Loss moved to {new_sl_price:.8f} "
+                    f"(if hit now, locks in {locked_pnl_pct:+.2f}% profit)")
 
         try:
             if old_order_id:
@@ -539,9 +543,10 @@ class TradeManager:
         with self.lock:
             self.open_trades[symbol] = trade
         
-        logger.info(f"✅ NEW TRADE: {side} {symbol} @ {entry_price:.8f} | "
-                   f"Qty: {quantity} | Lev: {leverage}x | "
-                   f"TP: {take_profit:.8f} | SL: {stop_loss:.8f}")
+        logger.info(f"┌─ 🟢 TRADE OPENED: {symbol} ────────────────────")
+        logger.info(f"│  Side: {side}  |  Entry: {entry_price:.8f}  |  Qty: {quantity}  |  Leverage: {leverage}x")
+        logger.info(f"│  Take Profit: {take_profit:.8f}   Stop Loss: {stop_loss:.8f}")
+        logger.info(f"└─────────────────────────────────────────────────")
 
         self._save_state()
 
@@ -710,8 +715,9 @@ class TradeManager:
             
             if pnl >= activate_pct and not trade["trailing_activated"]:
                 trade["trailing_activated"] = True
-                logger.info(f"🔺 Trailing ON: {trade['symbol']} @ {pnl*100:.2f}% "
-                            f"(ATR-based distance: {trail_distance_price:.8f})")
+                logger.info(f"🔺 [{trade['symbol']}] Trailing Stop ACTIVATED — profit is now "
+                            f"+{pnl*100:.2f}%, SL will follow the price up from here "
+                            f"(distance: {trail_distance_price:.8f})")
             
             if trade["trailing_activated"] and trade["highest_price"]:
                 new_sl = trade["highest_price"] - trail_distance_price
@@ -723,8 +729,9 @@ class TradeManager:
             
             if pnl >= activate_pct and not trade["trailing_activated"]:
                 trade["trailing_activated"] = True
-                logger.info(f"🔻 Trailing ON: {trade['symbol']} @ {pnl*100:.2f}% "
-                            f"(ATR-based distance: {trail_distance_price:.8f})")
+                logger.info(f"🔻 [{trade['symbol']}] Trailing Stop ACTIVATED — profit is now "
+                            f"+{pnl*100:.2f}%, SL will follow the price down from here "
+                            f"(distance: {trail_distance_price:.8f})")
             
             if trade["trailing_activated"] and trade["lowest_price"]:
                 new_sl = trade["lowest_price"] + trail_distance_price
@@ -868,10 +875,13 @@ class TradeManager:
             self.trade_history.append(trade)
 
         duration = (datetime.now() - trade["entry_time"]).seconds
-        status_icon = "✅" if exchange_closed else "⚠️ (exchange close FAILED)"
-        logger.info(f"🔒 TRADE CLOSED {status_icon}: {trade['side']} {symbol} | "
-                   f"PnL: {trade['pnl_percent']:.2f}% | "
-                   f"Duration: {duration}s | Reason: {reason}")
+        result_word = "PROFIT" if trade["pnl_percent"] > 0 else "LOSS"
+        result_icon = "🟢" if trade["pnl_percent"] > 0 else "🔴"
+        exchange_note = "" if exchange_closed else "  ⚠️ (exchange close FAILED - check manually)"
+        logger.info(f"┌─ {result_icon} TRADE CLOSED: {symbol} ({trade['side']}) ────────────────")
+        logger.info(f"│  Result: {result_word} {trade['pnl_percent']:+.2f}%  |  Reason: {reason}{exchange_note}")
+        logger.info(f"│  Entry: {trade['entry_price']:.8f}   Exit: {trade['close_price']:.8f}   Duration: {duration}s")
+        logger.info(f"└─────────────────────────────────────────────────")
 
         self._save_state()
     
