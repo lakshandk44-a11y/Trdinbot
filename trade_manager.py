@@ -921,7 +921,21 @@ class TradeManager:
         # never affects trade state or the save below even if this fails.
         if _TELEGRAM_AVAILABLE:
             try:
-                send_telegram(format_trade_closed(trade))
+                current_balance = None
+                try:
+                    # Fresh, exact balance right after this close (not a
+                    # cached/periodic value) - a separate try so a balance
+                    # fetch failure still lets the notification go out,
+                    # just without the balance line.
+                    acc = self.client.account()
+                    for asset in acc.get("assets", []):
+                        if asset.get("asset") == "USDT":
+                            current_balance = float(asset["walletBalance"])
+                            break
+                except Exception as e:
+                    logger.warning(f"Could not fetch balance for Telegram notify: {e}")
+
+                send_telegram(format_trade_closed(trade, current_balance))
             except Exception as e:
                 logger.warning(f"Telegram notify (close) failed: {e}")
 
