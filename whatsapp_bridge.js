@@ -17,6 +17,16 @@
  * internet) - the Python bot calls it locally, nothing else needs to.
  */
 
+// FIX (ReferenceError: crypto is not defined): Baileys expects the Web
+// Crypto API as a GLOBAL `crypto` object, which Node.js only exposes
+// globally by default from v20+. On older Node versions (common on a
+// stock EC2 install), this polyfill makes it available without needing
+// to upgrade Node itself. Must run before Baileys is required below.
+const { webcrypto } = require("crypto");
+if (!globalThis.crypto) {
+    globalThis.crypto = webcrypto;
+}
+
 const express = require("express");
 const {
     default: makeWASocket,
