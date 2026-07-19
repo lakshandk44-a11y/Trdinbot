@@ -68,9 +68,10 @@ def format_trade_opened(trade: dict) -> str:
     )
 
 
-def format_trade_closed(trade: dict) -> str:
+def format_trade_closed(trade: dict, balance: float = None) -> str:
     result = "PROFIT" if trade["pnl_percent"] > 0 else "LOSS"
     icon = "🟢" if trade["pnl_percent"] > 0 else "🔴"
+    balance_line = f"\nBalance now: {balance:.2f} USDT" if balance is not None else ""
     return (
         f"{icon} *TRADE CLOSED — {result}*\n"
         f"Coin: {trade['symbol']}\n"
@@ -79,6 +80,7 @@ def format_trade_closed(trade: dict) -> str:
         f"Reason: {trade.get('close_reason', 'N/A')}\n"
         f"Entry: {trade['entry_price']:.8f}\n"
         f"Exit: {trade.get('close_price', 0):.8f}"
+        f"{balance_line}"
     )
 
 
