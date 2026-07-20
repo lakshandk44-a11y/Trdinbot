@@ -19,7 +19,7 @@ BINANCE_TESTNET = True  # True for testnet, False for real account
 # TRADING PARAMETERS
 # ============================================================
 BALANCE_PERCENTAGE = 5  # à¶¶à·à¶½à¶±à·Šà·ƒà·Š à¶‘à¶šà·™à¶±à·Š 5%
-MAX_LEVERAGE = 5  # Maximum leverage (auto-adjusted based on coin)
+MAX_LEVERAGE = 10  # Maximum leverage (auto-adjusted based on coin)
 RISK_PER_TRADE = 0.02  # 2% risk per trade (for position sizing)
 
 # ============================================================
