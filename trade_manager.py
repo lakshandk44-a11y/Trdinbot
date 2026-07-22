@@ -935,7 +935,27 @@ class TradeManager:
                 except Exception as e:
                     logger.warning(f"Could not fetch balance for Telegram notify: {e}")
 
-                send_telegram(format_trade_closed(trade, current_balance))
+                # FIX (message should match Binance, per explicit request):
+                # trade["pnl_percent"] is OUR OWN estimate from tracked
+                # entry/close price and an assumed fee - it can drift from
+                # what Binance's account UI actually shows (real fill
+                # price, real fees, funding charged while open). Pull the
+                # REAL realized PnL Binance recorded for this exact close
+                # from the income endpoint - the same authoritative number
+                # the account UI displays - so the message matches exactly.
+                real_pnl_usdt = None
+                try:
+                    entry_ms = int(trade["entry_time"].timestamp() * 1000)
+                    records = self.client.income(
+                        symbol=symbol, income_type="REALIZED_PNL",
+                        start_time=entry_ms, limit=50
+                    )
+                    if isinstance(records, list):
+                        real_pnl_usdt = sum(float(r.get("income", 0)) for r in records)
+                except Exception as e:
+                    logger.warning(f"Could not fetch real PnL from Binance for Telegram notify: {e}")
+
+                send_telegram(format_trade_closed(trade, current_balance, real_pnl_usdt))
             except Exception as e:
                 logger.warning(f"Telegram notify (close) failed: {e}")
 
