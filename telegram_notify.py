@@ -68,15 +68,17 @@ def format_trade_opened(trade: dict) -> str:
     )
 
 
-def format_trade_closed(trade: dict, balance: float = None) -> str:
+def format_trade_closed(trade: dict, balance: float = None, real_pnl_usdt: float = None) -> str:
     result = "PROFIT" if trade["pnl_percent"] > 0 else "LOSS"
     icon = "🟢" if trade["pnl_percent"] > 0 else "🔴"
+    real_pnl_line = f"\nReal PnL (Binance): {real_pnl_usdt:+.2f} USDT" if real_pnl_usdt is not None else ""
     balance_line = f"\nBalance now: {balance:.2f} USDT" if balance is not None else ""
     return (
         f"{icon} *TRADE CLOSED — {result}*\n"
         f"Coin: {trade['symbol']}\n"
         f"Side: {trade['side']}\n"
-        f"PnL: {trade['pnl_percent']:+.2f}%\n"
+        f"PnL: {trade['pnl_percent']:+.2f}%"
+        f"{real_pnl_line}\n"
         f"Reason: {trade.get('close_reason', 'N/A')}\n"
         f"Entry: {trade['entry_price']:.8f}\n"
         f"Exit: {trade.get('close_price', 0):.8f}"
@@ -95,11 +97,12 @@ def format_trailing_activated(symbol: str, side: str, pnl_pct: float) -> str:
 
 
 def format_trailing_moved(symbol: str, new_sl: float, locked_pnl_pct: float) -> str:
+    outcome = "profit" if locked_pnl_pct >= 0 else "loss"
     return (
         f"🔺 *STOP LOSS MOVED*\n"
         f"Coin: {symbol}\n"
         f"New Stop Loss: {new_sl:.8f}\n"
-        f"If hit now, locks in: {locked_pnl_pct:+.2f}% profit"
+        f"If hit now: {locked_pnl_pct:+.2f}% ({outcome})"
     )
 
 
