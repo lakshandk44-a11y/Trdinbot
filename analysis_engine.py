@@ -819,6 +819,7 @@ class AnalysisEngine:
             "bos":               False,
             "choch":             False,
             "structure_broken":  None,
+            "choch_direction":   None,  # "bullish_choch"/"bearish_choch" for debugging/display - the counting logic uses structure_broken (plain "bullish"/"bearish") instead
             "last_bos_direction": None,
             # ---- New field ----
             "confidence":        0.0,   # 0.0 - 1.0 structural confidence score
@@ -896,11 +897,13 @@ class AnalysisEngine:
         # ================================================================
         if close[-1] > ref_high and result["trend"] == "bearish":
             result["choch"]              = True
-            result["structure_broken"]   = "bullish_choch"
+            result["structure_broken"]   = "bullish"
+            result["choch_direction"]    = "bullish_choch"
 
         if close[-1] < ref_low and result["trend"] == "bullish":
             result["choch"]              = True
-            result["structure_broken"]   = "bearish_choch"
+            result["structure_broken"]   = "bearish"
+            result["choch_direction"]    = "bearish_choch"
 
         # ================================================================
         # STEP 4 -- Confidence score (0.0 - 1.0)
