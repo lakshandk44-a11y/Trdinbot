@@ -63,7 +63,7 @@ def print_banner():
 ║           Auto Trading Bot - Binance Futures             ║
 ║                                                          ║
 ║  🕐 24/7 Operation  |  🖥️  EC2/PM2 Deploy               ║
-║  📊 Top 40 Coins    |  3 Timeframes                      ║
+║  📊 Top 50 Coins    |  3 Timeframes                      ║
 ║  🔧 5/3 Tools Rule | 65%+ Profit Filter                 ║
 ║  💰 Crash Protection | Unlimited Trades                  ║
 ╚══════════════════════════════════════════════════════════╝
@@ -79,7 +79,7 @@ def run_calibration_if_needed(logger):
     calibration_table.json doesn't exist yet.
 
     It's intentionally NOT re-run on every start/restart: the backtest
-    pulls up to 9 months of historical candles for all 40 coins across 3
+    pulls up to 9 months of historical candles for all 50 coins across 3
     timeframes and replays the analysis engine over each one, which can
     take a long time (potentially tens of minutes). Since PM2 restarts
     this process automatically on any crash, re-running the full backtest
