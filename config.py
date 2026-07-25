@@ -99,6 +99,20 @@ ANALYSIS_TOOLS = {
 }
 
 # ============================================================
+# TOOL 1 (ICT/SMC) - EXTENDED CONCEPTS
+# SMT Divergence, Kill Zones, Macro Structure, Unicorn Model,
+# Inverse Fairy Tale, Old Highs/Lows, Accumulation/Distribution.
+# All purely additive to Tool 1 - if a fetch below ever fails, the
+# relevant sub-feature just doesn't trigger that scan; nothing else
+# in the bot is affected (see bot_core._fetch_multi_timeframe).
+# ============================================================
+SMT_DIVERGENCE_ENABLED = True   # fetch a correlated symbol's candles for SMT Divergence
+SMT_CORRELATED_MAP = {}         # optional per-symbol override, e.g. {"SOLUSDT": "ETHUSDT"} - falls back to BTCUSDT (or ETHUSDT when scanning BTCUSDT itself) when a symbol isn't listed
+DAILY_HISTORY_CANDLES = 200     # ~6.5 months of daily candles fetched per symbol for Macro Structure (PDH/PDL/PWH/PWL) and Old Highs/Lows
+OLD_HIGH_LOW_MIN_DAYS = 30      # an "old" swing high/low must be at least this many days back
+OLD_HIGH_LOW_MAX_DAYS = 180     # ...and at most this many days back (~6 months)
+
+# ============================================================
 # NEWS API CONFIGURATION
 # ============================================================
 NEWS_API_KEY = os.getenv("NEWS_API_KEY", "YOUR_NEWS_API_KEY_HERE")
