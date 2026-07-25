@@ -125,27 +125,28 @@ def format_trailing_moved(symbol: str, new_sl: float, locked_pnl_pct: float) -> 
     )
 
 
-def format_tp1_hit(symbol: str) -> str:
+def format_tp1_hit(symbol: str, from_stage: int = 1, to_stage: int = 2) -> str:
     return (
-        f"🎯 *TP1 HIT*\n"
+        f"🎯 *TP{from_stage} HIT*\n"
         f"Coin: {_md_safe(symbol)}\n"
-        f"Re-analyzing market to decide: close here, or extend to TP2..."
+        f"Re-analyzing market to decide: close here, or extend to TP{to_stage}..."
     )
 
 
-def format_tp1_extended(symbol: str, tools_agreeing: int, min_tools: int, new_sl: float, new_tp: float) -> str:
+def format_tp1_extended(symbol: str, tools_agreeing: int, min_tools: int, new_sl: float, new_tp: float,
+                         to_stage: int = 2) -> str:
     return (
-        f"✅ *CONTINUING TO TP2*\n"
+        f"✅ *CONTINUING TO TP{to_stage}*\n"
         f"Coin: {_md_safe(symbol)}\n"
         f"Fresh analysis confirmed continuation ({tools_agreeing}/{min_tools} tools)\n"
         f"New Stop Loss: {new_sl:.8f} (profit locked)\n"
-        f"New Take Profit (TP2): {new_tp:.8f}"
+        f"New Take Profit (TP{to_stage}): {new_tp:.8f}"
     )
 
 
-def format_tp1_closed(symbol: str, tools_agreeing: int, min_tools: int) -> str:
+def format_tp1_closed(symbol: str, tools_agreeing: int, min_tools: int, at_stage: int = 1) -> str:
     return (
-        f"🔒 *CLOSING AT TP1*\n"
+        f"🔒 *CLOSING AT TP{at_stage}*\n"
         f"Coin: {_md_safe(symbol)}\n"
         f"Fresh analysis did NOT confirm continuation ({tools_agreeing}/{min_tools} tools)\n"
         f"Taking profit here."
