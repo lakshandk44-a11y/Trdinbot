@@ -604,24 +604,32 @@ class TradeManager:
     
     def _maybe_extend_to_tp2(self, trade: Dict) -> bool:
         """
-        FIX (TP1 -> TP2 continuation): called the instant TP1 is hit, before
+        FIX (TP1 -> TP2 continuation, extended to TP2 -> TP3 per explicit
+        request): called the instant a trade's current TP is hit, before
         the trade would otherwise be closed. Asks bot_core's registered
         callback to re-analyze the market for this symbol RIGHT NOW. If the
         fresh analysis still supports continuation, the trade's SL is moved
-        up to the TP1 price (locking in that profit) and a new TP2 target is
-        set — the trade stays OPEN instead of closing. Returns True if the
-        trade was extended (caller must NOT close it), False if it should
-        close at TP1 exactly as before (feature disabled, no callback,
-        analysis unavailable, or analysis doesn't confirm continuation).
+        up to the just-hit TP price (locking in that profit) and a new,
+        further target is set — the trade stays OPEN instead of closing.
+        Returns True if the trade was extended (caller must NOT close it),
+        False if it should close at the current TP exactly as before
+        (feature disabled, no callback, analysis unavailable, analysis
+        doesn't confirm continuation, or the trade is already at its final
+        stage).
 
-        This only ever fires once per trade: tp_stage flips from 1 to 2 as
-        soon as it fires, and this function immediately no-ops for any
-        trade already at stage 2 (or beyond), so a TP2 hit later always
-        closes the trade normally.
+        Fires from tp_stage 1 (-> extends to 2) and from tp_stage 2 (->
+        extends to 3) - EXACT SAME re-analysis/confirm/cancel logic both
+        times, nothing duplicated or special-cased between them. Capped at
+        stage 3: a trade already at tp_stage 3 always closes normally on
+        its next TP hit, same as tp_stage 2 always did before this change -
+        so this never runs more than twice per trade, and the original
+        TP1->TP2 behavior (including the single-extension cap) is preserved
+        exactly, just with one more extension now allowed on top of it.
         """
         if not self.config.get("TP1_REANALYSIS_ENABLED", False):
             return False
-        if trade.get("tp_stage", 1) != 1:
+        current_stage = trade.get("tp_stage", 1)
+        if current_stage not in (1, 2):   # stage 3 = final, no further extension
             return False
         if not self.tp1_reanalysis_callback:
             return False
@@ -662,17 +670,17 @@ class TradeManager:
         old_tp = trade["take_profit"]
         old_sl = trade["stop_loss"]
         trade["take_profit"] = self._round_price(symbol, new_tp)
-        trade["tp_stage"] = 2
+        trade["tp_stage"] = current_stage + 1
 
-        # Move the exchange-side stop up to lock in the TP1-level profit.
+        # Move the exchange-side stop up to lock in the just-hit TP's profit.
         # Reuses the same cancel-safe "place new, then cancel old" trailing
         # stop mechanism already used elsewhere, so there's never a moment
         # with zero exchange-side protection.
         self._update_trailing_stop_order(symbol, trade, new_sl)
 
-        logger.info(f"🚀 {symbol}: continuation confirmed — extending past TP1. "
+        logger.info(f"🚀 {symbol}: continuation confirmed — extending past TP{current_stage}. "
                     f"SL {old_sl:.8f} -> {trade['stop_loss']:.8f} | "
-                    f"TP {old_tp:.8f} -> {trade['take_profit']:.8f} (TP2)")
+                    f"TP {old_tp:.8f} -> {trade['take_profit']:.8f} (TP{trade['tp_stage']})")
 
         self._save_state()
         return True
