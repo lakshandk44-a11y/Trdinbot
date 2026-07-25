@@ -42,13 +42,17 @@ from config import (
     BINANCE_API_KEY, BINANCE_API_SECRET, BINANCE_TESTNET,
     TOP_40_COINS, TIMEFRAMES, MIN_TOOLS_MATCH,
     TAKE_PROFIT_PERCENT, STOP_LOSS_PERCENT,
+    SMT_DIVERGENCE_ENABLED, SMT_CORRELATED_MAP, DAILY_HISTORY_CANDLES,
+    OLD_HIGH_LOW_MIN_DAYS, OLD_HIGH_LOW_MAX_DAYS,
 )
 from bot_core import BinanceFuturesClient
 from analysis_engine import AnalysisEngine
 
 # Reuse the exact same historical-data machinery as the existing
 # calibration backtest, instead of duplicating it.
-from backtest_calibration import fetch_full_history, slice_up_to
+from backtest_calibration import (
+    fetch_full_history, slice_up_to, get_smt_correlated_symbol, REQUEST_PACING_SECONDS,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -111,6 +115,29 @@ def get_dynamic_tp_sl(side: str, entry_price: float, analysis: Dict) -> Tuple[Op
         if liq.get("sellside_liquidity"):
             support_candidates.append((liq["sellside_liquidity"], liq_strength))
 
+        # FIX (out of sync with live bot): bot_core._get_analysis_based_tp_sl()
+        # was later extended (per explicit request) to also consider Macro
+        # Structure (Previous Day/Week High-Low) and Old Highs/Lows as
+        # candidate TP/SL levels - weighted as fixed fractions of
+        # entry_price, same pattern as the liquidity weighting above. This
+        # backtest function's docstring claims to mirror that function
+        # "exactly", but this block was never backported here, so every
+        # dynamic-TP/SL backtest run silently tested an OLDER version of
+        # the live bot's own logic. Added here verbatim to match.
+        ict = tf.get("ict_smc", {})
+        if ict.get("pdh") is not None:
+            resistance_candidates.append((ict["pdh"], entry_price * 0.008))
+        if ict.get("pdl") is not None:
+            support_candidates.append((ict["pdl"], entry_price * 0.008))
+        if ict.get("pwh") is not None:
+            resistance_candidates.append((ict["pwh"], entry_price * 0.015))
+        if ict.get("pwl") is not None:
+            support_candidates.append((ict["pwl"], entry_price * 0.015))
+        for lvl in ict.get("old_highs", []):
+            resistance_candidates.append((lvl, entry_price * 0.006))
+        for lvl in ict.get("old_lows", []):
+            support_candidates.append((lvl, entry_price * 0.006))
+
     if side == "BUY":
         tp_pool = [(lvl, s) for lvl, s in resistance_candidates if lvl > entry_price]
         sl_pool = [(lvl, s) for lvl, s in support_candidates if lvl < entry_price]
@@ -151,7 +178,8 @@ def simulate_outcome_at_prices(lower_df: pd.DataFrame, entry_idx: int, direction
 
 
 def run_backtest_for_symbol(engine: AnalysisEngine, client: BinanceFuturesClient,
-                             symbol: str, months_back: int) -> List[Dict]:
+                             symbol: str, months_back: int,
+                             correlated_histories: Optional[Dict[str, Dict[str, pd.DataFrame]]] = None) -> List[Dict]:
     """
     Returns a list of per-setup comparison records:
     {"fixed_won": bool, "fixed_pnl_pct": float,
@@ -159,6 +187,13 @@ def run_backtest_for_symbol(engine: AnalysisEngine, client: BinanceFuturesClient
     dynamic_won is None when the analysis had no usable level for that
     setup (falls back to fixed live, so it's excluded from the dynamic
     comparison rather than counted either way).
+
+    FIX (calibration/live mismatch, same fix as backtest_calibration.py):
+    also fetches daily candles and slices in the pre-fetched correlated-
+    symbol history, so Tool 1's Macro Structure / Old Highs-Lows / SMT
+    Divergence sub-features - which feed the PDH/PDL/PWH/PWL/old-high/
+    old-low candidate levels in get_dynamic_tp_sl() above - actually have
+    real data to work with here, identical to what the live bot sees.
     """
     logger.info(f"Fetching history for {symbol}...")
 
@@ -169,6 +204,14 @@ def run_backtest_for_symbol(engine: AnalysisEngine, client: BinanceFuturesClient
     if higher_df is None or medium_df is None or lower_df is None:
         logger.warning(f"{symbol}: incomplete history, skipping")
         return []
+
+    daily_df = fetch_full_history(client, symbol, "1d", months_back)
+    if daily_df is None:
+        logger.debug(f"{symbol}: daily candles unavailable - Macro Structure / "
+                      f"Old Highs-Lows candidate levels will no-op for this symbol.")
+
+    corr_symbol = get_smt_correlated_symbol(symbol)
+    corr_hist = (correlated_histories or {}).get(corr_symbol)
 
     logger.info(f"{symbol}: {len(higher_df)} {TIMEFRAMES['higher']} / "
                 f"{len(medium_df)} {TIMEFRAMES['medium']} / "
@@ -191,9 +234,16 @@ def run_backtest_for_symbol(engine: AnalysisEngine, client: BinanceFuturesClient
             continue
 
         try:
-            result = engine.multi_timeframe_analysis({
-                "higher": higher_slice, "medium": medium_slice, "lower": lower_slice
-            })
+            mtf_input = {"higher": higher_slice, "medium": medium_slice, "lower": lower_slice}
+            if corr_hist:
+                mtf_input["correlated"] = {
+                    "higher": slice_up_to(corr_hist["higher"], current_time, LOOKBACK_LIMIT["higher"]),
+                    "medium": slice_up_to(corr_hist["medium"], current_time, LOOKBACK_LIMIT["medium"]),
+                    "lower": slice_up_to(corr_hist["lower"], current_time, LOOKBACK_LIMIT["lower"]),
+                }
+            if daily_df is not None:
+                mtf_input["daily"] = slice_up_to(daily_df, current_time, DAILY_HISTORY_CANDLES)
+            result = engine.multi_timeframe_analysis(mtf_input)
         except Exception as e:
             logger.debug(f"{symbol}: analysis error at {current_time}: {e}")
             continue
@@ -289,14 +339,35 @@ def main():
 
     client = BinanceFuturesClient(BINANCE_API_KEY, BINANCE_API_SECRET, testnet=BINANCE_TESTNET)
 
+    # FIX (calibration/live mismatch, same as backtest_calibration.py):
+    # pre-fetch each distinct correlated reference symbol's history once.
+    correlated_histories: Dict[str, Dict[str, pd.DataFrame]] = {}
+    if SMT_DIVERGENCE_ENABLED:
+        needed = {get_smt_correlated_symbol(s) for s in symbols} | set(SMT_CORRELATED_MAP.values())
+        for corr_symbol in needed:
+            logger.info(f"Pre-fetching correlated-symbol history for SMT Divergence: {corr_symbol}")
+            h = fetch_full_history(client, corr_symbol, TIMEFRAMES["higher"], args.months)
+            time.sleep(REQUEST_PACING_SECONDS)
+            m = fetch_full_history(client, corr_symbol, TIMEFRAMES["medium"], args.months)
+            time.sleep(REQUEST_PACING_SECONDS)
+            l = fetch_full_history(client, corr_symbol, TIMEFRAMES["lower"], args.months)
+            time.sleep(REQUEST_PACING_SECONDS)
+            if h is not None and m is not None and l is not None:
+                correlated_histories[corr_symbol] = {"higher": h, "medium": m, "lower": l}
+            else:
+                logger.warning(f"Could not fetch full history for correlated symbol {corr_symbol} - "
+                                f"SMT Divergence will no-op for every symbol mapped to it.")
+
     engine_config = {"TIMEFRAMES": TIMEFRAMES, "MIN_TOOLS_MATCH": MIN_TOOLS_MATCH,
-                     "CALIBRATION_TABLE_FILE": "__no_such_calibration_file__.json"}
+                     "CALIBRATION_TABLE_FILE": "__no_such_calibration_file__.json",
+                     "OLD_HIGH_LOW_MIN_DAYS": OLD_HIGH_LOW_MIN_DAYS,
+                     "OLD_HIGH_LOW_MAX_DAYS": OLD_HIGH_LOW_MAX_DAYS}
     engine = AnalysisEngine(engine_config)
 
     all_records: List[Dict] = []
     for symbol in symbols:
         try:
-            records = run_backtest_for_symbol(engine, client, symbol, args.months)
+            records = run_backtest_for_symbol(engine, client, symbol, args.months, correlated_histories)
             all_records.extend(records)
         except Exception as e:
             logger.error(f"{symbol}: backtest failed: {e}")
