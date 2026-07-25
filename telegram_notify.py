@@ -56,11 +56,30 @@ def send_telegram(message: str):
         logger.warning(f"Telegram notify unavailable: {e}")
 
 
+def _md_safe(text) -> str:
+    """
+    FIX (Telegram 400 "can't find end of the entity"): Telegram's legacy
+    `Markdown` parse_mode treats _ * ` [ as formatting markers and (unlike
+    MarkdownV2) does NOT support escaping them with a backslash - an odd
+    number of any of these in the message makes Telegram reject the WHOLE
+    message. Values we interpolate that come from trade data are safe
+    (symbol/side are plain uppercase letters, numbers have no markers) with
+    ONE exception: close_reason values like "STOP_LOSS" / "TAKE_PROFIT" /
+    "REVERSAL_SIGNAL" contain underscores, which is exactly what broke
+    every SL-hit close notification. Since legacy Markdown can't escape
+    these, the safe fix is to strip/neutralize the marker characters from
+    any dynamic text before it goes into the message - formatting is only
+    ever applied to the static labels we write ourselves, never to dynamic
+    values, so this is safe for every current and future caller.
+    """
+    return str(text).replace("_", " ").replace("*", "").replace("`", "").replace("[", "")
+
+
 def format_trade_opened(trade: dict) -> str:
     return (
         f"🟢 *TRADE OPENED*\n"
-        f"Coin: {trade['symbol']}\n"
-        f"Side: {trade['side']}\n"
+        f"Coin: {_md_safe(trade['symbol'])}\n"
+        f"Side: {_md_safe(trade['side'])}\n"
         f"Entry: {trade['entry_price']:.8f}\n"
         f"Take Profit: {trade['take_profit']:.8f}\n"
         f"Stop Loss: {trade['stop_loss']:.8f}\n"
@@ -75,11 +94,11 @@ def format_trade_closed(trade: dict, balance: float = None, real_pnl_usdt: float
     balance_line = f"\nBalance now: {balance:.2f} USDT" if balance is not None else ""
     return (
         f"{icon} *TRADE CLOSED — {result}*\n"
-        f"Coin: {trade['symbol']}\n"
-        f"Side: {trade['side']}\n"
+        f"Coin: {_md_safe(trade['symbol'])}\n"
+        f"Side: {_md_safe(trade['side'])}\n"
         f"PnL: {trade['pnl_percent']:+.2f}%"
         f"{real_pnl_line}\n"
-        f"Reason: {trade.get('close_reason', 'N/A')}\n"
+        f"Reason: {_md_safe(trade.get('close_reason', 'N/A'))}\n"
         f"Entry: {trade['entry_price']:.8f}\n"
         f"Exit: {trade.get('close_price', 0):.8f}"
         f"{balance_line}"
@@ -89,8 +108,8 @@ def format_trade_closed(trade: dict, balance: float = None, real_pnl_usdt: float
 def format_trailing_activated(symbol: str, side: str, pnl_pct: float) -> str:
     return (
         f"🔺 *TRAILING STOP ACTIVATED*\n"
-        f"Coin: {symbol}\n"
-        f"Side: {side}\n"
+        f"Coin: {_md_safe(symbol)}\n"
+        f"Side: {_md_safe(side)}\n"
         f"Profit now: +{pnl_pct:.2f}%\n"
         f"Stop Loss will now follow the price to protect profit."
     )
@@ -100,7 +119,7 @@ def format_trailing_moved(symbol: str, new_sl: float, locked_pnl_pct: float) -> 
     outcome = "profit" if locked_pnl_pct >= 0 else "loss"
     return (
         f"🔺 *STOP LOSS MOVED*\n"
-        f"Coin: {symbol}\n"
+        f"Coin: {_md_safe(symbol)}\n"
         f"New Stop Loss: {new_sl:.8f}\n"
         f"If hit now: {locked_pnl_pct:+.2f}% ({outcome})"
     )
@@ -109,7 +128,7 @@ def format_trailing_moved(symbol: str, new_sl: float, locked_pnl_pct: float) -> 
 def format_tp1_hit(symbol: str) -> str:
     return (
         f"🎯 *TP1 HIT*\n"
-        f"Coin: {symbol}\n"
+        f"Coin: {_md_safe(symbol)}\n"
         f"Re-analyzing market to decide: close here, or extend to TP2..."
     )
 
@@ -117,7 +136,7 @@ def format_tp1_hit(symbol: str) -> str:
 def format_tp1_extended(symbol: str, tools_agreeing: int, min_tools: int, new_sl: float, new_tp: float) -> str:
     return (
         f"✅ *CONTINUING TO TP2*\n"
-        f"Coin: {symbol}\n"
+        f"Coin: {_md_safe(symbol)}\n"
         f"Fresh analysis confirmed continuation ({tools_agreeing}/{min_tools} tools)\n"
         f"New Stop Loss: {new_sl:.8f} (profit locked)\n"
         f"New Take Profit (TP2): {new_tp:.8f}"
@@ -127,7 +146,7 @@ def format_tp1_extended(symbol: str, tools_agreeing: int, min_tools: int, new_sl
 def format_tp1_closed(symbol: str, tools_agreeing: int, min_tools: int) -> str:
     return (
         f"🔒 *CLOSING AT TP1*\n"
-        f"Coin: {symbol}\n"
+        f"Coin: {_md_safe(symbol)}\n"
         f"Fresh analysis did NOT confirm continuation ({tools_agreeing}/{min_tools} tools)\n"
         f"Taking profit here."
     )
