@@ -1079,29 +1079,40 @@ class HackerAIBot:
 
     def _tp1_reanalysis_decision(self, symbol: str, trade: Dict) -> Optional[Dict]:
         """
-        FIX (TP1 -> TP2 continuation): called by TradeManager the instant a
-        trade's TP1 is hit, BEFORE it would otherwise be closed. Re-fetches
+        FIX (TP1 -> TP2 continuation, extended to TP2 -> TP3 per explicit
+        request): called by TradeManager the instant a trade's CURRENT take
+        profit is hit, BEFORE it would otherwise be closed. Re-fetches
         fresh multi-timeframe data and re-runs the exact same analysis used
         for entries and reversal checks (same tools, same MIN_TOOLS_MATCH
         rule) — nothing new is introduced here, it's the identical decision
         process, just re-run at this exact moment for this one symbol.
 
+        This function itself was already stage-agnostic (it just reads
+        trade["take_profit"], whatever it currently is, and looks for the
+        next level beyond it) - the only change here is using the trade's
+        own tp_stage to label the logs/Telegram messages correctly as
+        TP1->TP2 or TP2->TP3 instead of always saying "TP1"/"TP2". Whether
+        this fires a second time at all is decided by TradeManager's
+        _maybe_extend_to_tp2 (capped at stage 3), not here.
+
         Returns None if the market does NOT confirm continuation, or if
         fresh data can't be fetched right now — TradeManager then closes
-        the trade at TP1 exactly as it always has. Returns
+        the trade at the current TP exactly as it always has. Returns
         {"extend": True, "new_sl": <price>, "new_tp": <price>} if
         continuation IS confirmed, so TradeManager moves the stop up to the
-        TP1 price (locking in that profit) and keeps the trade open toward
-        the new TP2 level instead.
+        just-hit TP price (locking in that profit) and keeps the trade open
+        toward the next TP level instead.
         """
+        from_stage = trade.get("tp_stage", 1)
+        to_stage = from_stage + 1
         try:
             ohlc_data = self._fetch_multi_timeframe(symbol)
             if ohlc_data is None:
-                logger.warning(f"⚠️ {symbol}: no fresh data for TP1 re-analysis — closing at TP1.")
+                logger.warning(f"⚠️ {symbol}: no fresh data for TP{from_stage} re-analysis — closing at TP{from_stage}.")
                 return None
             analysis = self.analysis_engine.multi_timeframe_analysis(ohlc_data)
         except Exception as e:
-            logger.error(f"⚠️ {symbol}: TP1 re-analysis fetch/analysis failed ({e}) — closing at TP1.")
+            logger.error(f"⚠️ {symbol}: TP{from_stage} re-analysis fetch/analysis failed ({e}) — closing at TP{from_stage}.")
             return None
 
         final = analysis.get("final_signal", {})
@@ -1109,31 +1120,32 @@ class HackerAIBot:
         tools_agreeing = final.get("tools_agreeing", 0)
         min_tools = self.config.get("MIN_TOOLS_MATCH", 3)
 
-        logger.info(f"🎯 [{symbol}] TP1 HIT — re-analyzing market before deciding "
-                    f"whether to close here or extend toward TP2...")
+        logger.info(f"🎯 [{symbol}] TP{from_stage} HIT — re-analyzing market before deciding "
+                    f"whether to close here or extend toward TP{to_stage}...")
         if _TELEGRAM_AVAILABLE:
             try:
-                send_telegram(format_tp1_hit(symbol))
+                send_telegram(format_tp1_hit(symbol, from_stage=from_stage, to_stage=to_stage))
             except Exception as e:
-                logger.warning(f"Telegram notify (TP1 hit) failed: {e}")
+                logger.warning(f"Telegram notify (TP{from_stage} hit) failed: {e}")
 
         side = trade["side"]
         wants_continue = (side == "BUY" and direction == 1) or (side == "SELL" and direction == -1)
         if not wants_continue or tools_agreeing < min_tools:
             logger.info(f"❌ [{symbol}] Fresh analysis does NOT confirm continuation "
-                        f"({tools_agreeing}/{min_tools} tools) — closing at TP1, profit locked.")
+                        f"({tools_agreeing}/{min_tools} tools) — closing at TP{from_stage}, profit locked.")
             if _TELEGRAM_AVAILABLE:
                 try:
-                    send_telegram(format_tp1_closed(symbol, tools_agreeing, min_tools))
+                    send_telegram(format_tp1_closed(symbol, tools_agreeing, min_tools, at_stage=from_stage))
                 except Exception as e:
-                    logger.warning(f"Telegram notify (TP1 closed) failed: {e}")
-            return None  # market doesn't confirm continuation -> close at TP1, unchanged
+                    logger.warning(f"Telegram notify (TP{from_stage} closed) failed: {e}")
+            return None  # market doesn't confirm continuation -> close at current TP, unchanged
 
         tp1_level = trade["take_profit"]
 
         # Reuse the same order-block / FVG / liquidity level detection used
-        # to set the original TP/SL, just anchored at the TP1 price instead
-        # of the entry price, to find the NEXT resistance/support beyond it.
+        # to set the original TP/SL, just anchored at the just-hit TP price
+        # instead of the entry price, to find the NEXT resistance/support
+        # beyond it.
         new_tp, _ = self._get_analysis_based_tp_sl(symbol, side, tp1_level, analysis)
 
         min_extra = abs(tp1_level - trade["entry_price"]) * 0.5
@@ -1142,17 +1154,17 @@ class HackerAIBot:
             extra = trade["entry_price"] * tp_percent
             new_tp = tp1_level + extra if side == "BUY" else tp1_level - extra
 
-        new_sl = tp1_level  # lock in the TP1-level profit as the new stop
+        new_sl = tp1_level  # lock in the just-hit TP's profit as the new stop
 
         logger.info(f"✅ [{symbol}] Continuation CONFIRMED ({tools_agreeing}/{min_tools} tools) — "
-                    f"extending to TP2.")
-        logger.info(f"   New Stop Loss: {new_sl:.8f} (was TP1 — profit now locked, can't go back to loss)")
-        logger.info(f"   New Take Profit (TP2): {new_tp:.8f}")
+                    f"extending to TP{to_stage}.")
+        logger.info(f"   New Stop Loss: {new_sl:.8f} (was TP{from_stage} — profit now locked, can't go back to loss)")
+        logger.info(f"   New Take Profit (TP{to_stage}): {new_tp:.8f}")
         if _TELEGRAM_AVAILABLE:
             try:
-                send_telegram(format_tp1_extended(symbol, tools_agreeing, min_tools, new_sl, new_tp))
+                send_telegram(format_tp1_extended(symbol, tools_agreeing, min_tools, new_sl, new_tp, to_stage=to_stage))
             except Exception as e:
-                logger.warning(f"Telegram notify (TP1 extended) failed: {e}")
+                logger.warning(f"Telegram notify (TP{from_stage} extended) failed: {e}")
 
         return {"extend": True, "new_sl": new_sl, "new_tp": new_tp}
 
