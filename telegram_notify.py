@@ -76,31 +76,72 @@ def _md_safe(text) -> str:
 
 
 def format_trade_opened(trade: dict) -> str:
-    return (
+    """
+    FIX (user request): now also shows WHICH of the 5 tools agreed and
+    WHICH of their own named sub-concepts fired, per timeframe (4h/1h/15m)
+    - exactly the same tools/sub-concepts that decided this trade, read
+    straight from trade["analysis"]["tool_breakdown"] (see bot_core
+    ._execute_trade). Falls back to the original simple message untouched
+    if that breakdown isn't present (e.g. an older trade from before this
+    change, still open across a bot restart).
+    """
+    header = (
         f"🟢 *TRADE OPENED*\n"
-        f"Coin: {_md_safe(trade['symbol'])}\n"
-        f"Side: {_md_safe(trade['side'])}\n"
+        f"Coin: {_md_safe(trade['symbol'])}  ({_md_safe(trade['side'])})\n"
         f"Entry: {trade['entry_price']:.8f}\n"
         f"Take Profit: {trade['take_profit']:.8f}\n"
         f"Stop Loss: {trade['stop_loss']:.8f}\n"
         f"Qty: {trade['quantity']}  |  Leverage: {trade['leverage']}x"
     )
 
+    breakdown = (trade.get("analysis") or {}).get("tool_breakdown") or {}
+    tf_labels = [("higher", "4h"), ("medium", "1h"), ("lower", "15m")]
+    lines = []
+    for tf_key, tf_label in tf_labels:
+        tools = breakdown.get(tf_key) or []
+        if not tools:
+            continue
+        tool_bits = [f"{_md_safe(t['tool'])} ({_md_safe(', '.join(t['subconcepts']))})" for t in tools]
+        lines.append(f"⏱ {tf_label}: " + "  |  ".join(tool_bits))
+
+    if lines:
+        header += "\n\n📊 *Why this trade opened:*\n" + "\n".join(lines)
+
+    return header
+
+
+_CLOSE_REASON_LABELS = {
+    "TAKE_PROFIT":     ("🎯", "Take Profit Hit"),
+    "STOP_LOSS":       ("🛑", "Stop Loss Hit"),
+    "REVERSAL_SIGNAL": ("🔄", "Reversal Signal"),
+    "MANUAL_CLOSE":    ("✋", "Manually Closed"),
+}
+
 
 def format_trade_closed(trade: dict, balance: float = None, real_pnl_usdt: float = None) -> str:
+    """
+    FIX (user request): clearer layout - friendly reason label/icon instead
+    of a raw code like "STOP_LOSS", and PROFIT/LOSS + reason + balance each
+    on their own clearly-labeled line. Same underlying data as before
+    (pnl_percent, close_reason, entry/exit price, real_pnl_usdt, balance) -
+    nothing about what triggers this message or what data it receives changed.
+    """
     result = "PROFIT" if trade["pnl_percent"] > 0 else "LOSS"
     icon = "🟢" if trade["pnl_percent"] > 0 else "🔴"
+    reason_key = trade.get("close_reason", "N/A")
+    reason_icon, reason_label = _CLOSE_REASON_LABELS.get(reason_key, ("ℹ️", _md_safe(reason_key)))
+
     real_pnl_line = f"\nReal PnL (Binance): {real_pnl_usdt:+.2f} USDT" if real_pnl_usdt is not None else ""
-    balance_line = f"\nBalance now: {balance:.2f} USDT" if balance is not None else ""
+    balance_line = f"\n💰 Balance now: {balance:.2f} USDT" if balance is not None else ""
+
     return (
         f"{icon} *TRADE CLOSED — {result}*\n"
-        f"Coin: {_md_safe(trade['symbol'])}\n"
-        f"Side: {_md_safe(trade['side'])}\n"
-        f"PnL: {trade['pnl_percent']:+.2f}%"
-        f"{real_pnl_line}\n"
-        f"Reason: {_md_safe(trade.get('close_reason', 'N/A'))}\n"
+        f"Coin: {_md_safe(trade['symbol'])}  ({_md_safe(trade['side'])})\n"
+        f"Reason: {reason_icon} {reason_label}\n"
         f"Entry: {trade['entry_price']:.8f}\n"
-        f"Exit: {trade.get('close_price', 0):.8f}"
+        f"Exit: {trade.get('close_price', 0):.8f}\n"
+        f"PnL: {trade['pnl_percent']:+.2f}%"
+        f"{real_pnl_line}"
         f"{balance_line}"
     )
 
