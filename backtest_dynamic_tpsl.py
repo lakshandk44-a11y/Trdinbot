@@ -40,7 +40,7 @@ import pandas as pd
 
 from config import (
     BINANCE_API_KEY, BINANCE_API_SECRET, BINANCE_TESTNET,
-    TOP_40_COINS, TIMEFRAMES, MIN_TOOLS_MATCH,
+    TOP_40_COINS, TIMEFRAMES, MIN_TOOLS_MATCH, MIN_SUBCONCEPTS_PER_TOOL,
     TAKE_PROFIT_PERCENT, STOP_LOSS_PERCENT,
     SMT_DIVERGENCE_ENABLED, SMT_CORRELATED_MAP, DAILY_HISTORY_CANDLES,
     OLD_HIGH_LOW_MIN_DAYS, OLD_HIGH_LOW_MAX_DAYS,
@@ -359,6 +359,7 @@ def main():
                                 f"SMT Divergence will no-op for every symbol mapped to it.")
 
     engine_config = {"TIMEFRAMES": TIMEFRAMES, "MIN_TOOLS_MATCH": MIN_TOOLS_MATCH,
+                     "MIN_SUBCONCEPTS_PER_TOOL": MIN_SUBCONCEPTS_PER_TOOL,
                      "CALIBRATION_TABLE_FILE": "__no_such_calibration_file__.json",
                      "OLD_HIGH_LOW_MIN_DAYS": OLD_HIGH_LOW_MIN_DAYS,
                      "OLD_HIGH_LOW_MAX_DAYS": OLD_HIGH_LOW_MAX_DAYS}
