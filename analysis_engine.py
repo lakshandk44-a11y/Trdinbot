@@ -1998,4 +1998,11 @@ class AnalysisEngine:
                             sentiment -= 1
                 
                 max_possible = len(articles) * 2
-                
+                if max_possible > 0:
+                    normalized = sentiment / max_possible
+                    return max(min(normalized, 1.0), -1.0)
+                    
+        except Exception as e:
+            logger.error(f"News API error: {e}")
+        
+        return 0.0
