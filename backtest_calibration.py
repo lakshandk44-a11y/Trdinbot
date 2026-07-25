@@ -46,6 +46,8 @@ from config import (
     BINANCE_API_KEY, BINANCE_API_SECRET, BINANCE_TESTNET,
     TOP_40_COINS, TIMEFRAMES, MIN_TOOLS_MATCH,
     TAKE_PROFIT_PERCENT, STOP_LOSS_PERCENT,
+    SMT_DIVERGENCE_ENABLED, SMT_CORRELATED_MAP, DAILY_HISTORY_CANDLES,
+    OLD_HIGH_LOW_MIN_DAYS, OLD_HIGH_LOW_MAX_DAYS,
 )
 from bot_core import BinanceFuturesClient
 from analysis_engine import AnalysisEngine
@@ -265,6 +267,21 @@ def slice_up_to(df: pd.DataFrame, current_time: int, limit: int) -> pd.DataFrame
     return sliced.tail(limit).reset_index(drop=True)
 
 
+def get_smt_correlated_symbol(symbol: str) -> str:
+    """
+    FIX (calibration/live mismatch): mirrors
+    bot_core.HackerAIBot._get_smt_correlated_symbol() exactly, so the
+    calibration backtest exercises Tool 1's SMT Divergence sub-feature
+    against the SAME correlated reference pair the live bot uses - instead
+    of never triggering it at all (see run_calibration_for_symbol).
+    """
+    if symbol in SMT_CORRELATED_MAP:
+        return SMT_CORRELATED_MAP[symbol]
+    if symbol == "BTCUSDT":
+        return "ETHUSDT"
+    return "BTCUSDT"
+
+
 def simulate_outcome(lower_df: pd.DataFrame, entry_idx: int, direction: str,
                       tp_price: float, sl_price: float) -> Optional[bool]:
     """Walk forward on the lower timeframe candle-by-candle until TP or SL is
@@ -292,11 +309,24 @@ def simulate_outcome(lower_df: pd.DataFrame, entry_idx: int, direction: str,
 
 
 def run_calibration_for_symbol(engine: AnalysisEngine, client: BinanceFuturesClient,
-                                symbol: str, months_back: int) -> List[Dict]:
+                                symbol: str, months_back: int,
+                                correlated_histories: Optional[Dict[str, Dict[str, pd.DataFrame]]] = None) -> List[Dict]:
     """Returns a list of {"score": float, "won": bool} labeled setups for one symbol,
     using the bot's OWN current fixed-percent TP/SL (TAKE_PROFIT_PERCENT/
     STOP_LOSS_PERCENT) - this calibrates the score against exactly what the
-    live bot actually trades with today."""
+    live bot actually trades with today.
+
+    FIX (calibration/live mismatch): the live bot's Tool 1 also uses SMT
+    Divergence (needs a correlated symbol's candles) and Macro Structure /
+    Old Highs-Lows (needs daily candles) - see bot_core._fetch_multi_timeframe.
+    This used to only ever pass higher/medium/lower to the analysis engine,
+    so those Tool 1 sub-features silently never triggered during
+    calibration, even though they DO trigger live - meaning the calibration
+    table was built against a slightly different (incomplete) version of
+    Tool 1 than what's actually trading. Now daily candles are fetched per
+    symbol here, and correlated-symbol candles (pre-fetched once in main()
+    and passed in via correlated_histories) are sliced the same way as
+    higher/medium/lower below - identical to what the live bot assembles."""
     logger.info(f"Fetching history for {symbol}...")
 
     higher_df = fetch_full_history(client, symbol, TIMEFRAMES["higher"], months_back)
@@ -308,6 +338,19 @@ def run_calibration_for_symbol(engine: AnalysisEngine, client: BinanceFuturesCli
     if higher_df is None or medium_df is None or lower_df is None:
         logger.warning(f"{symbol}: incomplete history, skipping")
         return []
+
+    time.sleep(REQUEST_PACING_SECONDS)
+    daily_df = fetch_full_history(client, symbol, "1d", months_back)
+    if daily_df is None:
+        logger.debug(f"{symbol}: daily candles unavailable - Macro Structure / "
+                      f"Old Highs-Lows will no-op for this symbol (matches live bot's "
+                      f"own no-op fallback when the daily fetch fails).")
+
+    corr_symbol = get_smt_correlated_symbol(symbol)
+    corr_hist = (correlated_histories or {}).get(corr_symbol)
+    if SMT_DIVERGENCE_ENABLED and not corr_hist:
+        logger.debug(f"{symbol}: no pre-fetched correlated history for {corr_symbol} - "
+                      f"SMT Divergence will no-op for this symbol.")
 
     logger.info(f"{symbol}: {len(higher_df)} {TIMEFRAMES['higher']} / "
                 f"{len(medium_df)} {TIMEFRAMES['medium']} / "
@@ -330,9 +373,16 @@ def run_calibration_for_symbol(engine: AnalysisEngine, client: BinanceFuturesCli
             continue
 
         try:
-            result = engine.multi_timeframe_analysis({
-                "higher": higher_slice, "medium": medium_slice, "lower": lower_slice
-            })
+            mtf_input = {"higher": higher_slice, "medium": medium_slice, "lower": lower_slice}
+            if corr_hist:
+                mtf_input["correlated"] = {
+                    "higher": slice_up_to(corr_hist["higher"], current_time, LOOKBACK_LIMIT["higher"]),
+                    "medium": slice_up_to(corr_hist["medium"], current_time, LOOKBACK_LIMIT["medium"]),
+                    "lower": slice_up_to(corr_hist["lower"], current_time, LOOKBACK_LIMIT["lower"]),
+                }
+            if daily_df is not None:
+                mtf_input["daily"] = slice_up_to(daily_df, current_time, DAILY_HISTORY_CANDLES)
+            result = engine.multi_timeframe_analysis(mtf_input)
         except Exception as e:
             logger.debug(f"{symbol}: analysis error at {current_time}: {e}")
             continue
@@ -427,18 +477,43 @@ def main():
 
     client = BinanceFuturesClient(BINANCE_API_KEY, BINANCE_API_SECRET, testnet=BINANCE_TESTNET)
 
+    # FIX (calibration/live mismatch): pre-fetch each DISTINCT correlated
+    # reference symbol's history ONCE (almost every symbol maps to
+    # BTCUSDT/ETHUSDT - see get_smt_correlated_symbol), instead of
+    # re-fetching it per-symbol, which would multiply the already-long
+    # runtime by ~2x for no benefit.
+    correlated_histories: Dict[str, Dict[str, pd.DataFrame]] = {}
+    if SMT_DIVERGENCE_ENABLED:
+        needed = {get_smt_correlated_symbol(s) for s in symbols} | set(SMT_CORRELATED_MAP.values())
+        for corr_symbol in needed:
+            logger.info(f"Pre-fetching correlated-symbol history for SMT Divergence: {corr_symbol}")
+            h = fetch_full_history(client, corr_symbol, TIMEFRAMES["higher"], args.months)
+            time.sleep(REQUEST_PACING_SECONDS)
+            m = fetch_full_history(client, corr_symbol, TIMEFRAMES["medium"], args.months)
+            time.sleep(REQUEST_PACING_SECONDS)
+            l = fetch_full_history(client, corr_symbol, TIMEFRAMES["lower"], args.months)
+            time.sleep(REQUEST_PACING_SECONDS)
+            if h is not None and m is not None and l is not None:
+                correlated_histories[corr_symbol] = {"higher": h, "medium": m, "lower": l}
+            else:
+                logger.warning(f"Could not fetch full history for correlated symbol {corr_symbol} - "
+                                f"SMT Divergence will no-op for every symbol mapped to it (same "
+                                f"safe no-op behavior the live bot falls back to on a fetch failure).")
+
     # CALIBRATION_TABLE_FILE points at a file that doesn't exist so the
     # engine used purely for backtesting always returns the RAW heuristic
     # score (never an already-calibrated one) - we're building the table,
     # not consuming it.
     engine_config = {"TIMEFRAMES": TIMEFRAMES, "MIN_TOOLS_MATCH": MIN_TOOLS_MATCH,
-                      "CALIBRATION_TABLE_FILE": "__no_such_calibration_file__.json"}
+                      "CALIBRATION_TABLE_FILE": "__no_such_calibration_file__.json",
+                      "OLD_HIGH_LOW_MIN_DAYS": OLD_HIGH_LOW_MIN_DAYS,
+                      "OLD_HIGH_LOW_MAX_DAYS": OLD_HIGH_LOW_MAX_DAYS}
     engine = AnalysisEngine(engine_config)
 
     all_labeled: List[Dict] = []
     for symbol in symbols:
         try:
-            labeled = run_calibration_for_symbol(engine, client, symbol, args.months)
+            labeled = run_calibration_for_symbol(engine, client, symbol, args.months, correlated_histories)
             all_labeled.extend(labeled)
         except Exception as e:
             logger.error(f"{symbol}: calibration failed: {e}")
