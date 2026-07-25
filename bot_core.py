@@ -186,6 +186,31 @@ class BinanceFuturesClient:
             return data
         return data
 
+    def income(self, symbol: str = None, income_type: str = None,
+               start_time: int = None, end_time: int = None,
+               limit: int = 100) -> list:
+        """
+        FIX (missing method): trade_manager.py calls self.client.income(...)
+        to pull Binance's own REALIZED_PNL record for the Telegram
+        "real PnL" notification, but this method never existed on
+        BinanceFuturesClient - every call raised
+        AttributeError: 'BinanceFuturesClient' object has no attribute 'income',
+        caught by trade_manager's own try/except (so it never crashed the
+        bot), but real_pnl_usdt was always None and the log filled with
+        this warning on every trade close.
+        GET /fapi/v1/income - signed, returns a list of income records.
+        """
+        params = {"limit": limit}
+        if symbol:
+            params["symbol"] = symbol
+        if income_type:
+            params["incomeType"] = income_type
+        if start_time is not None:
+            params["startTime"] = start_time
+        if end_time is not None:
+            params["endTime"] = end_time
+        return self._get("/fapi/v1/income", params)
+
     def change_leverage(self, symbol: str, leverage: int) -> dict:
         return self._post("/fapi/v1/leverage", {
             "symbol": symbol,
