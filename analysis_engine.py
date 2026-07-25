@@ -31,15 +31,43 @@ class AnalysisEngine:
         self.calibration_table_file = config.get("CALIBRATION_TABLE_FILE", "calibration_table.json")
         self._calibration_table = self._load_calibration_table()
         
-    def calculate_all_indicators(self, ohlc: pd.DataFrame) -> Dict:
-        """Run all 5 analysis tools on a single timeframe"""
+    def calculate_all_indicators(self, ohlc: pd.DataFrame,
+                                  correlated_ohlc: Optional[pd.DataFrame] = None,
+                                  daily_ohlc: Optional[pd.DataFrame] = None) -> Dict:
+        """
+        Run all 5 analysis tools on a single timeframe.
+
+        correlated_ohlc / daily_ohlc are OPTIONAL extra context used only by
+        Tool 1's extended concepts (SMT Divergence needs a correlated
+        symbol's candles; Macro Structure / Old Highs-Lows need daily
+        candles). If either is not provided, those specific sub-features
+        simply don't trigger - nothing else changes, exactly like before.
+        """
         results = {}
-        
-        results["ict_smc"] = self._ict_smc_analysis(ohlc)
-        results["fvg"] = self._detect_fvg(ohlc)
-        results["order_block"] = self._detect_order_blocks(ohlc)
-        results["liquidity"] = self._detect_liquidity(ohlc)
-        results["market_structure"] = self._market_structure(ohlc)
+
+        # Tools 2-4 (and 5) are computed FIRST and handed to Tool 1 as
+        # read-only input. This is a pure re-ordering - none of Tools 2-5's
+        # own detection logic is touched at all - it just lets Tool 1 spot
+        # confluences that span multiple tools (e.g. the Unicorn Model =
+        # FVG + Order Block + Liquidity Sweep all in one zone) without
+        # duplicating their detection code.
+        fvg_result = self._detect_fvg(ohlc)
+        ob_result = self._detect_order_blocks(ohlc, fvg=fvg_result)
+        liquidity_result = self._detect_liquidity(ohlc)
+        ms_result = self._market_structure(ohlc)
+
+        results["ict_smc"] = self._ict_smc_analysis(
+            ohlc,
+            fvg=fvg_result,
+            ob=ob_result,
+            liquidity=liquidity_result,
+            correlated_ohlc=correlated_ohlc,
+            daily_ohlc=daily_ohlc,
+        )
+        results["fvg"] = fvg_result
+        results["order_block"] = ob_result
+        results["liquidity"] = liquidity_result
+        results["market_structure"] = ms_result
         
         # Count how many tools agree on direction
         results["bullish_tools"] = 0
@@ -89,7 +117,12 @@ class AnalysisEngine:
         
         return results
     
-    def _ict_smc_analysis(self, ohlc: pd.DataFrame) -> Dict:
+    def _ict_smc_analysis(self, ohlc: pd.DataFrame,
+                           fvg: Optional[Dict] = None,
+                           ob: Optional[Dict] = None,
+                           liquidity: Optional[Dict] = None,
+                           correlated_ohlc: Optional[pd.DataFrame] = None,
+                           daily_ohlc: Optional[pd.DataFrame] = None) -> Dict:
         """
         Tool 1: ICT / Smart Money Concepts Analysis
 
@@ -112,6 +145,20 @@ class AnalysisEngine:
             favored.
           - Volume-confirmed displacement, used as an approximation for
             inducement (a liquidity grab followed by a strong reversal move).
+          - SMT Divergence: correlated-pair (e.g. BTC/ETH) divergence between
+            swing highs/lows - the highest-conviction reversal signal.
+          - Kill Zones: London / New York / Silver Bullet session windows.
+          - Macro Structure: Previous Week/Day High-Low and Opening Range.
+          - Unicorn Model: FVG + Order Block + Liquidity Sweep confluence.
+          - Inverse Fairy Tale: a swept strong high/low that closes back
+            beyond it - trend-continuation signal.
+          - Old Highs/Lows: swing levels from ~1-6 months back.
+          - Accumulation/Distribution (Wyckoff): range-bound volume profile.
+
+        fvg / ob / liquidity are the ALREADY-COMPUTED outputs of Tools 2, 3
+        and 4 (read-only) - used here only to detect the Unicorn Model
+        confluence. correlated_ohlc / daily_ohlc are optional extra data;
+        when not supplied the corresponding sub-features simply don't fire.
         """
         result = {
             "bullish": False, "bearish": False, "strength": 0,
@@ -127,6 +174,29 @@ class AnalysisEngine:
             "choch_direction": None,  # "bullish" | "bearish"
             "mss": False,         # Market Structure Shift confirmed
             "mss_direction": None,  # "bullish" | "bearish"
+            # ---- Extended ICT/SMC concepts ----
+            "smt_bullish_divergence": False,
+            "smt_bearish_divergence": False,
+            "kill_zone": None,            # "london" | "new_york" | "silver_bullet" | None
+            "in_kill_zone": False,
+            "pdh": None, "pdl": None,       # Previous Day High/Low
+            "pwh": None, "pwl": None,       # Previous Week High/Low
+            "opening_range_high": None, "opening_range_low": None,
+            "macro_break_bullish": False,
+            "macro_break_bearish": False,
+            "unicorn_bullish": False,
+            "unicorn_bearish": False,
+            "inverse_fairy_tale_bullish": False,
+            "inverse_fairy_tale_bearish": False,
+            "old_highs": [],
+            "old_lows": [],
+            "old_level_support": None,
+            "old_level_resistance": None,
+            "wyckoff_phase": None,         # "accumulation" | "distribution" | None
+            "wyckoff_range_high": None,
+            "wyckoff_range_low": None,
+            "wyckoff_breakout_bullish": False,
+            "wyckoff_breakout_bearish": False,
         }
 
         if len(ohlc) < 50:
@@ -314,6 +384,311 @@ class AnalysisEngine:
                     result["bearish"] = True
                     result["strength"] -= 2
 
+        # ================================================================
+        # 9. SMT (SMART MONEY TECHNIQUE) DIVERGENCE
+        #    Compares this asset's most recent two swing lows/highs against
+        #    a correlated pair's (e.g. BTC/ETH). If THIS asset makes a lower
+        #    low while the correlated asset makes a higher low -> bullish
+        #    SMT divergence (top-tier reversal signal). Mirror for highs.
+        #    Requires correlated_ohlc to be supplied - no-ops otherwise.
+        # ================================================================
+        if correlated_ohlc is not None and len(correlated_ohlc) >= 30 and len(ohlc) >= 30:
+            try:
+                c_high = correlated_ohlc["high"].values
+                c_low = correlated_ohlc["low"].values
+                n_cmp = min(30, len(high), len(c_high), len(low), len(c_low))
+
+                def _last_two_pivot_lows(arr):
+                    pivots = []
+                    for i in range(2, len(arr) - 2):
+                        if (arr[i] < arr[i - 1] and arr[i] < arr[i - 2]
+                                and arr[i] < arr[i + 1] and arr[i] < arr[i + 2]):
+                            pivots.append(arr[i])
+                    return pivots[-2:] if len(pivots) >= 2 else None
+
+                def _last_two_pivot_highs(arr):
+                    pivots = []
+                    for i in range(2, len(arr) - 2):
+                        if (arr[i] > arr[i - 1] and arr[i] > arr[i - 2]
+                                and arr[i] > arr[i + 1] and arr[i] > arr[i + 2]):
+                            pivots.append(arr[i])
+                    return pivots[-2:] if len(pivots) >= 2 else None
+
+                own_lows_pv = _last_two_pivot_lows(low[-n_cmp:])
+                corr_lows_pv = _last_two_pivot_lows(c_low[-n_cmp:])
+                if own_lows_pv and corr_lows_pv:
+                    if own_lows_pv[1] < own_lows_pv[0] and corr_lows_pv[1] > corr_lows_pv[0]:
+                        result["smt_bullish_divergence"] = True
+                        result["bullish"] = True
+                        result["strength"] += 3
+
+                own_highs_pv = _last_two_pivot_highs(high[-n_cmp:])
+                corr_highs_pv = _last_two_pivot_highs(c_high[-n_cmp:])
+                if own_highs_pv and corr_highs_pv:
+                    if own_highs_pv[1] > own_highs_pv[0] and corr_highs_pv[1] < corr_highs_pv[0]:
+                        result["smt_bearish_divergence"] = True
+                        result["bearish"] = True
+                        result["strength"] -= 3
+            except Exception as e:
+                logger.debug(f"SMT divergence check skipped: {e}")
+
+        # ================================================================
+        # 10. KILL ZONES (session timing)
+        #     London 02:00-05:00 UTC, New York 08:00-11:00 UTC,
+        #     Silver Bullet 09:50-10:10 UTC (highest-priority, narrowest).
+        #     Uses the candle's OWN timestamp (not wall-clock) so this is
+        #     equally correct live and when replayed in a backtest.
+        #     Not directional by itself - adds conviction to whatever
+        #     directional bias already exists during these windows.
+        # ================================================================
+        try:
+            if "timestamp" in ohlc.columns and len(ohlc) > 0:
+                last_ts = pd.to_numeric(pd.Series(ohlc["timestamp"].iloc[-1]), errors="coerce").iloc[0]
+                candle_dt = (datetime.utcfromtimestamp(last_ts / 1000.0)
+                             if pd.notna(last_ts) else datetime.utcnow())
+            else:
+                candle_dt = datetime.utcnow()
+        except Exception:
+            candle_dt = datetime.utcnow()
+
+        hh, mm = candle_dt.hour, candle_dt.minute
+        kill_zone = None
+        if 2 <= hh < 5:
+            kill_zone = "london"
+        if 8 <= hh < 11:
+            kill_zone = "new_york"
+        if (hh == 9 and mm >= 50) or (hh == 10 and mm <= 10):
+            kill_zone = "silver_bullet"   # narrowest/most specific window wins
+
+        result["kill_zone"] = kill_zone
+        result["in_kill_zone"] = kill_zone is not None
+
+        if kill_zone is not None:
+            if result["bullish"] and not result["bearish"]:
+                result["strength"] += 1
+            elif result["bearish"] and not result["bullish"]:
+                result["strength"] -= 1
+
+        # ================================================================
+        # 11. MACRO STRUCTURE (Weekly/Daily levels)
+        #     Previous Day High/Low, Previous Week High/Low, and today's
+        #     Opening Range - from the supplied daily candles. A close
+        #     beyond PDH/PWH or PDL/PWL is treated as a macro break.
+        #     Requires daily_ohlc to be supplied - no-ops otherwise.
+        # ================================================================
+        if daily_ohlc is not None and len(daily_ohlc) >= 3 and "timestamp" in daily_ohlc.columns:
+            try:
+                d = daily_ohlc.copy()
+                d["timestamp"] = pd.to_numeric(d["timestamp"], errors="coerce")
+                d = d.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+                d["_dt"] = pd.to_datetime(d["timestamp"], unit="ms", utc=True)
+
+                if len(d) >= 2:
+                    prev_day = d.iloc[-2]
+                    result["pdh"] = float(prev_day["high"])
+                    result["pdl"] = float(prev_day["low"])
+
+                iso = d["_dt"].dt.isocalendar()
+                d["_iso_year"] = iso["year"]
+                d["_iso_week"] = iso["week"]
+                weekly = d.groupby(["_iso_year", "_iso_week"]).agg(
+                    wh=("high", "max"), wl=("low", "min")
+                ).reset_index()
+                if len(weekly) >= 2:
+                    prev_week = weekly.iloc[-2]
+                    result["pwh"] = float(prev_week["wh"])
+                    result["pwl"] = float(prev_week["wl"])
+
+                today = d.iloc[-1]
+                result["opening_range_high"] = float(today["high"])
+                result["opening_range_low"] = float(today["low"])
+
+                c_last = close[-1]
+                if result["pdh"] is not None and c_last > result["pdh"]:
+                    result["macro_break_bullish"] = True
+                if result["pwh"] is not None and c_last > result["pwh"]:
+                    result["macro_break_bullish"] = True
+                if result["pdl"] is not None and c_last < result["pdl"]:
+                    result["macro_break_bearish"] = True
+                if result["pwl"] is not None and c_last < result["pwl"]:
+                    result["macro_break_bearish"] = True
+
+                if result["macro_break_bullish"] and not result["macro_break_bearish"]:
+                    result["bullish"] = True
+                    result["strength"] += 2
+                elif result["macro_break_bearish"] and not result["macro_break_bullish"]:
+                    result["bearish"] = True
+                    result["strength"] -= 2
+            except Exception as e:
+                logger.debug(f"Macro structure check skipped: {e}")
+
+        # ================================================================
+        # 12. UNICORN MODEL
+        #     FVG + Order Block + Liquidity Sweep all overlapping in the
+        #     same price zone in the same direction - the strongest single
+        #     ICT confluence pattern. Uses Tools 2/3/4's own already-computed
+        #     results (read-only) - their detection logic is untouched.
+        # ================================================================
+        if fvg and ob and liquidity:
+            try:
+                swept_dir = liquidity.get("recent_sweep")
+
+                if swept_dir == "sellside":
+                    bull_ob = ob.get("bullish_ob")
+                    if bull_ob:
+                        for f in fvg.get("fvg_levels", []):
+                            if f.get("type") == "bullish" and not f.get("mitigated"):
+                                if max(bull_ob["low"], f["low"]) <= min(bull_ob["high"], f["high"]):
+                                    result["unicorn_bullish"] = True
+                                    result["bullish"] = True
+                                    result["strength"] += 3
+                                    break
+
+                if swept_dir == "buyside":
+                    bear_ob = ob.get("bearish_ob")
+                    if bear_ob:
+                        for f in fvg.get("fvg_levels", []):
+                            if f.get("type") == "bearish" and not f.get("mitigated"):
+                                if max(bear_ob["low"], f["low"]) <= min(bear_ob["high"], f["high"]):
+                                    result["unicorn_bearish"] = True
+                                    result["bearish"] = True
+                                    result["strength"] -= 3
+                                    break
+            except Exception as e:
+                logger.debug(f"Unicorn Model check skipped: {e}")
+
+        # ================================================================
+        # 13. INVERSE FAIRY TALE
+        #     A strong high/low gets swept (pierced) but price closes back
+        #     beyond it within a few candles - a failed break that signals
+        #     trend CONTINUATION in the original direction.
+        # ================================================================
+        try:
+            lookback_ift = min(6, len(ohlc) - 1)
+            if swing_low_levels and lookback_ift >= 2:
+                ref_low = swing_low_levels[-1]
+                pierced = any(low[-k] < ref_low for k in range(2, lookback_ift + 1))
+                if pierced and close[-1] > ref_low:
+                    result["inverse_fairy_tale_bullish"] = True
+                    result["bullish"] = True
+                    result["strength"] += 2
+
+            if swing_high_levels and lookback_ift >= 2:
+                ref_high = swing_high_levels[-1]
+                pierced_h = any(high[-k] > ref_high for k in range(2, lookback_ift + 1))
+                if pierced_h and close[-1] < ref_high:
+                    result["inverse_fairy_tale_bearish"] = True
+                    result["bearish"] = True
+                    result["strength"] -= 2
+        except Exception as e:
+            logger.debug(f"Inverse Fairy Tale check skipped: {e}")
+
+        # ================================================================
+        # 14. OLD HIGHS / LOWS (OHL/OLH)
+        #     Swing highs/lows from the supplied daily candles that are
+        #     roughly 1-6 months old. Price currently sitting near one of
+        #     these levels is treated as a reaction-zone confluence.
+        #     Requires daily_ohlc to be supplied - no-ops otherwise.
+        # ================================================================
+        if daily_ohlc is not None and len(daily_ohlc) >= 40 and "timestamp" in daily_ohlc.columns:
+            try:
+                d2 = daily_ohlc.copy()
+                d2["timestamp"] = pd.to_numeric(d2["timestamp"], errors="coerce")
+                d2 = d2.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+                d_high = d2["high"].values
+                d_low = d2["low"].values
+                d_ts = d2["timestamp"].values
+                now_ms = d_ts[-1]   # dataset's own "now" -> correct live AND in backtests
+                day_ms = 24 * 60 * 60 * 1000
+
+                min_days = self.config.get("OLD_HIGH_LOW_MIN_DAYS", 30)
+                max_days = self.config.get("OLD_HIGH_LOW_MAX_DAYS", 180)
+                pivot_n2 = 5
+
+                old_highs, old_lows = [], []
+                for i in range(pivot_n2, len(d2) - pivot_n2):
+                    age_days = (now_ms - d_ts[i]) / day_ms
+                    if not (min_days <= age_days <= max_days):
+                        continue
+                    if (all(d_high[i] > d_high[i - k] for k in range(1, pivot_n2 + 1))
+                            and all(d_high[i] > d_high[i + k] for k in range(1, pivot_n2 + 1))):
+                        old_highs.append(float(d_high[i]))
+                    if (all(d_low[i] < d_low[i - k] for k in range(1, pivot_n2 + 1))
+                            and all(d_low[i] < d_low[i + k] for k in range(1, pivot_n2 + 1))):
+                        old_lows.append(float(d_low[i]))
+
+                result["old_highs"] = old_highs
+                result["old_lows"] = old_lows
+
+                tol = 0.005   # 0.5% proximity tolerance
+                c_last = close[-1]
+                for lvl in old_lows:
+                    if lvl > 0 and abs(c_last - lvl) / lvl <= tol and c_last >= lvl:
+                        result["old_level_support"] = lvl
+                        result["bullish"] = True
+                        result["strength"] += 1
+                        break
+                for lvl in old_highs:
+                    if lvl > 0 and abs(c_last - lvl) / lvl <= tol and c_last <= lvl:
+                        result["old_level_resistance"] = lvl
+                        result["bearish"] = True
+                        result["strength"] -= 1
+                        break
+            except Exception as e:
+                logger.debug(f"Old Highs/Lows check skipped: {e}")
+
+        # ================================================================
+        # 15. ACCUMULATION / DISTRIBUTION (Wyckoff)
+        #     A tight trading range (span small relative to average candle
+        #     range) with a volume profile skewed to up-candles = likely
+        #     Accumulation (bullish bias); skewed to down-candles = likely
+        #     Distribution (bearish bias). A close breaking out of the range
+        #     in the phase's implied direction confirms it.
+        # ================================================================
+        try:
+            wyckoff_window = min(25, len(ohlc) - 1)
+            if wyckoff_window >= 15:
+                w_high = high[-wyckoff_window:]
+                w_low = low[-wyckoff_window:]
+                w_close = close[-wyckoff_window:]
+                w_open = open_p[-wyckoff_window:]
+                range_high = float(np.max(w_high))
+                range_low = float(np.min(w_low))
+                range_span = range_high - range_low
+
+                recent_ranges2 = (high[-31:-1] - low[-31:-1]) if len(high) >= 31 else (high - low)
+                avg_range2 = float(np.mean(recent_ranges2)) if len(recent_ranges2) > 0 else 0.0
+                is_ranging = bool(avg_range2 > 0 and range_span < avg_range2 * 4)
+
+                if is_ranging:
+                    up_vol = 0.0
+                    down_vol = 0.0
+                    if volume is not None and len(volume) >= wyckoff_window:
+                        w_vol = volume[-wyckoff_window:]
+                        up_mask = w_close > w_open
+                        down_mask = w_close < w_open
+                        up_vol = float(np.sum(w_vol[up_mask]))
+                        down_vol = float(np.sum(w_vol[down_mask]))
+
+                    result["wyckoff_range_high"] = range_high
+                    result["wyckoff_range_low"] = range_low
+
+                    if up_vol > down_vol * 1.2:
+                        result["wyckoff_phase"] = "accumulation"
+                    elif down_vol > up_vol * 1.2:
+                        result["wyckoff_phase"] = "distribution"
+
+                    if result["wyckoff_phase"] == "accumulation" and close[-1] > range_high:
+                        result["wyckoff_breakout_bullish"] = True
+                        result["bullish"] = True
+                        result["strength"] += 2
+                    elif result["wyckoff_phase"] == "distribution" and close[-1] < range_low:
+                        result["wyckoff_breakout_bearish"] = True
+                        result["bearish"] = True
+                        result["strength"] -= 2
+        except Exception as e:
+            logger.debug(f"Wyckoff Accumulation/Distribution check skipped: {e}")
+
         return result
     
     def _detect_fvg(self, ohlc: pd.DataFrame) -> Dict:
@@ -326,8 +701,28 @@ class AnalysisEngine:
             (bearish).  Only gaps larger than the ATR filter threshold are kept.
           - ATR Filter: gaps smaller than 0.25 * ATR(14) are noise — ignored.
             This ensures only institutionally-relevant imbalances are flagged.
-          - Mitigation: a gap is mitigated once price fully trades back into it
-            (close inside the gap zone).
+          - Mitigation (by Close AND by Wick): a gap is mitigated once price
+            trades back into it. This is tracked as mitigated_by_close (a
+            candle CLOSED inside the gap) and mitigated_by_wick (a candle's
+            high/low TOUCHED the gap even if the close didn't) separately -
+            the overall "mitigated" flag (used everywhere else) is true if
+            EITHER happened, since a wick tap into the zone already means
+            that liquidity/imbalance has been traded through.
+          - Consequent Encroachment (CE): the 50% midpoint of an FVG - the
+            classic ICT entry level within the gap. Each gap entry carries
+            its own "ce" price, and an active CE-zone touch (price currently
+            trading at/near the CE of a fresh, unmitigated gap) is flagged.
+          - FVG Stacking: 2 or 3 unmitigated FVGs of the same direction
+            formed close together in time (the same impulsive leg) - an
+            Order Flow Imbalance, weighted higher than a single lone gap.
+          - Gap FVG (raw/weekend gaps): a genuine 2-candle price gap (no
+            overlap at all between consecutive candles, distinct from the
+            3-candle FVG definition) - specifically flagged when it spans a
+            traditional-market weekend close (Friday evening -> Sat/Sun/Mon).
+          - Mitigated vs Unmitigated tracking: every fvg_levels entry keeps
+            its own mitigated flag so once used it is not treated as a fresh
+            zone again by any caller (bullish_fvg/bearish_fvg only turn on
+            for UNMITIGATED gaps, same as before).
           - IFVG (Inverse FVG): a previously mitigated FVG that price later
             reverses from.  The gap that was once support / resistance flips
             polarity — a mitigated bullish FVG becomes a bearish IFVG level
@@ -343,6 +738,15 @@ class AnalysisEngine:
             "ifvg_bearish": False,   # inverted (was bullish FVG, now acts as resistance)
             "ifvg_levels": [],       # list of IFVG zones with polarity
             "atr": None,             # ATR(14) value used for filtering
+            # ---- Extended FVG concepts ----
+            "ce_entry_bullish": False,   # price currently trading at the CE (50%) of a fresh bullish FVG
+            "ce_entry_bearish": False,   # price currently trading at the CE (50%) of a fresh bearish FVG
+            "stacked_bullish": False,
+            "stacked_bearish": False,
+            "stack_count_bullish": 0,
+            "stack_count_bearish": 0,
+            "weekend_gaps": [],          # raw 2-candle price gaps (separate from the 3-candle FVG definition)
+            "has_weekend_gap": False,
         }
 
         if len(ohlc) < 20:
@@ -384,21 +788,38 @@ class AnalysisEngine:
             if gap_high > gap_low:
                 gap_size = gap_high - gap_low
                 if gap_size >= min_gap_size:
-                    # Mitigation: any subsequent close inside the gap zone
-                    mitigated = any(
+                    # Mitigation by CLOSE: a subsequent candle closed inside the gap zone
+                    mitigated_by_close = any(
                         gap_low <= close[-(j)] <= gap_high
                         for j in range(1, i)          # candles after the gap formed
                     )
+                    # Mitigation by WICK (touch): a subsequent candle's high/low
+                    # range overlaps the gap at all, even without closing inside it.
+                    mitigated_by_wick = any(
+                        low[-(j)] <= gap_high and high[-(j)] >= gap_low
+                        for j in range(1, i)
+                    )
+                    mitigated = mitigated_by_close or mitigated_by_wick
+                    ce = float((gap_high + gap_low) / 2)   # Consequent Encroachment
                     entry = {
                         "type": "bullish",
                         "high": float(gap_high),
                         "low":  float(gap_low),
                         "size": float(gap_size),
+                        "ce": ce,
                         "mitigated": mitigated,
+                        "mitigated_by_close": mitigated_by_close,
+                        "mitigated_by_wick": mitigated_by_wick,
+                        "i_pos": i,   # recency marker (smaller = more recent) - used for stacking
                     }
                     result["fvg_levels"].append(entry)
                     if not mitigated:
                         result["bullish_fvg"] = True
+                        # CE entry: price is currently trading at/near this fresh
+                        # gap's 50% midpoint (classic ICT entry trigger).
+                        ce_tolerance = max(atr * 0.15, gap_size * 0.15)
+                        if gap_low <= close[-1] <= gap_high and abs(close[-1] - ce) <= ce_tolerance:
+                            result["ce_entry_bullish"] = True
 
                     # IFVG: mitigated bullish FVG → now acts as bearish resistance
                     if mitigated:
@@ -424,20 +845,33 @@ class AnalysisEngine:
             if gap_high2 > gap_low2:
                 gap_size2 = gap_high2 - gap_low2
                 if gap_size2 >= min_gap_size:
-                    mitigated2 = any(
+                    mitigated_by_close2 = any(
                         gap_low2 <= close[-(j)] <= gap_high2
                         for j in range(1, i)
                     )
+                    mitigated_by_wick2 = any(
+                        low[-(j)] <= gap_high2 and high[-(j)] >= gap_low2
+                        for j in range(1, i)
+                    )
+                    mitigated2 = mitigated_by_close2 or mitigated_by_wick2
+                    ce2 = float((gap_high2 + gap_low2) / 2)
                     entry2 = {
                         "type": "bearish",
                         "high": float(gap_high2),
                         "low":  float(gap_low2),
                         "size": float(gap_size2),
+                        "ce": ce2,
                         "mitigated": mitigated2,
+                        "mitigated_by_close": mitigated_by_close2,
+                        "mitigated_by_wick": mitigated_by_wick2,
+                        "i_pos": i,
                     }
                     result["fvg_levels"].append(entry2)
                     if not mitigated2:
                         result["bearish_fvg"] = True
+                        ce_tolerance2 = max(atr * 0.15, gap_size2 * 0.15)
+                        if gap_low2 <= close[-1] <= gap_high2 and abs(close[-1] - ce2) <= ce_tolerance2:
+                            result["ce_entry_bearish"] = True
 
                     # IFVG: mitigated bearish FVG → now acts as bullish support
                     if mitigated2:
@@ -458,9 +892,87 @@ class AnalysisEngine:
         if result["fvg_levels"]:
             result["mitigated"] = all(f["mitigated"] for f in result["fvg_levels"])
 
+        # ================================================================
+        # FVG STACKING (Order Flow Imbalance)
+        # 2 or 3 unmitigated FVGs of the SAME direction, formed close
+        # together in time (within a handful of candles of each other),
+        # count as a "stack" - repeated one-directional imbalance instead
+        # of a single isolated gap.
+        # ================================================================
+        def _count_stack(entries):
+            entries_sorted = sorted(entries, key=lambda f: f["i_pos"])
+            if len(entries_sorted) < 2:
+                return 1 if entries_sorted else 0
+            best = 1
+            run = 1
+            for a, b in zip(entries_sorted, entries_sorted[1:]):
+                if abs(b["i_pos"] - a["i_pos"]) <= 8:   # close together in time
+                    run += 1
+                    best = max(best, run)
+                else:
+                    run = 1
+            return best
+
+        bullish_unmit = [f for f in result["fvg_levels"] if f["type"] == "bullish" and not f["mitigated"]]
+        bearish_unmit = [f for f in result["fvg_levels"] if f["type"] == "bearish" and not f["mitigated"]]
+
+        result["stack_count_bullish"] = _count_stack(bullish_unmit)
+        result["stack_count_bearish"] = _count_stack(bearish_unmit)
+        result["stacked_bullish"] = result["stack_count_bullish"] >= 2
+        result["stacked_bearish"] = result["stack_count_bearish"] >= 2
+
+        # ================================================================
+        # GAP FVG (raw/weekend gaps) - a genuine 2-candle price gap where
+        # there is NO overlap at all between consecutive candles (distinct
+        # from the 3-candle FVG imbalance definition above). Flagged
+        # specifically as a "weekend gap" when it spans a traditional
+        # Friday-evening -> Saturday/Sunday/Monday market close, which is
+        # when this concept classically occurs.
+        # ================================================================
+        if "timestamp" in ohlc.columns:
+            try:
+                ts_vals = pd.to_numeric(ohlc["timestamp"], errors="coerce").values
+                gap_scan_end = min(40, len(ohlc) - 1)
+                for k in range(1, gap_scan_end):
+                    i_now, i_prev = -k, -(k + 1)
+                    gap_up = low[i_now] > high[i_prev]
+                    gap_down = high[i_now] < low[i_prev]
+                    if not (gap_up or gap_down):
+                        continue
+
+                    prev_ts, now_ts = ts_vals[i_prev], ts_vals[i_now]
+                    if pd.isna(prev_ts) or pd.isna(now_ts):
+                        continue
+
+                    prev_dt = datetime.utcfromtimestamp(float(prev_ts) / 1000.0)
+                    now_dt = datetime.utcfromtimestamp(float(now_ts) / 1000.0)
+                    # Mon=0 ... Sun=6. Traditional markets close Friday evening
+                    # and reopen Monday - a gap spanning that window is a
+                    # classic "weekend gap".
+                    is_weekend_span = (
+                        prev_dt.weekday() == 4 and prev_dt.hour >= 20
+                        and now_dt.weekday() in (5, 6, 0)
+                    )
+
+                    if gap_up:
+                        g_low, g_high = float(high[i_prev]), float(low[i_now])
+                    else:
+                        g_low, g_high = float(high[i_now]), float(low[i_prev])
+
+                    result["weekend_gaps"].append({
+                        "type": "bullish" if gap_up else "bearish",
+                        "low": g_low,
+                        "high": g_high,
+                        "is_weekend": bool(is_weekend_span),
+                    })
+                    if is_weekend_span:
+                        result["has_weekend_gap"] = True
+            except Exception as e:
+                logger.debug(f"Weekend/raw gap check skipped: {e}")
+
         return result
     
-    def _detect_order_blocks(self, ohlc: pd.DataFrame) -> Dict:
+    def _detect_order_blocks(self, ohlc: pd.DataFrame, fvg: Optional[Dict] = None) -> Dict:
         """
         Tool 3: Order Block Detection
 
@@ -477,17 +989,48 @@ class AnalysisEngine:
           - Retest: price has returned to touch an unmitigated OB zone after
             the initial move away from it. A retest of a valid OB is the
             preferred entry trigger in ICT methodology.
+          - Mitigation Flagging (Used OB): once price re-enters an OB zone
+            (by close OR by wick) in the candles after the impulse move, that
+            OB is marked mitigated=True and excluded from active entry signals.
+            Only fresh, unmitigated OBs are set as bullish_ob / bearish_ob.
+            Mitigated OBs are collected in mitigated_obs for reference.
+          - OB + FVG Confluence (Overlap): the % of the OB zone that overlaps
+            with any unmitigated FVG zone. Higher overlap = higher probability
+            setup. Requires the already-computed FVG result (fvg parameter).
+            Stored per-OB as ob_fvg_overlap_pct; the maximum across all active
+            OBs is stored in ob_fvg_confluence_pct.
+          - Rejection Block: an OB candle whose body is tiny relative to its
+            total range (body_ratio < 30%) — dominated by wicks — signalling a
+            strong rejection / pin-bar at the OB zone. Stored separately as
+            rejection_block_bullish / rejection_block_bearish.
+          - Order Flow Imbalance (Volume): the OB candle's volume relative to
+            the local average of surrounding candles. A ratio >= 1.5 means the
+            OB formed on above-average institutional activity and is therefore
+            considered volume-confirmed. Stored per-OB as volume_ratio /
+            volume_confirmed, and rolled up to top-level flags.
+          - OB Quality Score: the OB candle's body-to-range ratio expressed
+            as a 0-100 score (score > 60 = strong). Stored per-OB as
+            quality_score and body_ratio.
         """
         result = {
             "bullish_ob": None,
             "bearish_ob": None,
             "ob_levels": [],
-            # ---- New fields ----
-            "breaker_bullish": None,   # bearish OB that got broken -> now support
-            "breaker_bearish": None,   # bullish OB that got broken -> now resistance
+            # ---- Existing fields ----
+            "breaker_bullish": None,          # bearish OB that got broken -> now support
+            "breaker_bearish": None,          # bullish OB that got broken -> now resistance
             "breaker_levels": [],
-            "retest_bullish": False,   # price is currently retesting a bullish OB
-            "retest_bearish": False,   # price is currently retesting a bearish OB
+            "retest_bullish": False,          # price currently retesting a bullish OB
+            "retest_bearish": False,          # price currently retesting a bearish OB
+            # ---- New fields ----
+            "rejection_block_bullish": None,  # first active bullish OB that is also a rejection block
+            "rejection_block_bearish": None,  # first active bearish OB that is also a rejection block
+            "rejection_block_levels": [],     # all active rejection blocks found
+            "ob_fvg_confluence_pct": 0.0,     # highest OB+FVG zone overlap % among active OBs
+            "has_ob_fvg_confluence": False,   # True if any active OB overlaps an unmitigated FVG
+            "volume_confirmed_bullish": False, # any active bullish OB was high-volume at formation
+            "volume_confirmed_bearish": False, # any active bearish OB was high-volume at formation
+            "mitigated_obs": [],              # list of OBs that have been used/mitigated
         }
 
         if len(ohlc) < 10:
@@ -497,6 +1040,10 @@ class AnalysisEngine:
         close  = ohlc["close"].values
         high   = ohlc["high"].values
         low    = ohlc["low"].values
+        volume = ohlc["volume"].values if "volume" in ohlc.columns else None
+
+        # Global average volume (fallback when local window is unavailable)
+        avg_volume_global = float(np.mean(volume)) if volume is not None and len(volume) > 0 else 0.0
 
         # ================================================================
         # STEP 1 -- Identify Order Blocks (last 40 candles)
@@ -519,39 +1066,141 @@ class AnalysisEngine:
                 continue
             move_body_ratio = move_body / move_range
 
+            ob_high  = float(high[ob_idx])
+            ob_low   = float(low[ob_idx])
+            ob_range = ob_high - ob_low
+
+            # ---- OB Quality Score: body / total-range ratio ----
+            ob_body       = abs(close[ob_idx] - open_p[ob_idx])
+            body_ratio    = (ob_body / ob_range) if ob_range > 0 else 0.0
+            quality_score = round(body_ratio * 100, 1)   # 0–100; >60 = strong body
+            # Rejection Block: body < 30% of range → large wicks dominate (pin-bar style)
+            is_rejection  = body_ratio < 0.30
+
+            # ---- Order Flow Imbalance (Volume) ----
+            # Compare OB candle's volume to local ±5-candle average (excluding OB itself).
+            if volume is not None:
+                ob_abs_idx   = len(ohlc) + ob_idx           # convert to 0-based index
+                ctx_start    = max(0, ob_abs_idx - 5)
+                ctx_end      = min(len(ohlc), ob_abs_idx + 6)
+                ctx_vols     = [volume[k] for k in range(ctx_start, ctx_end)
+                                if k != ob_abs_idx]
+                local_avg_vol = float(np.mean(ctx_vols)) if ctx_vols else avg_volume_global
+                ob_vol        = float(volume[ob_idx])
+                volume_ratio  = (ob_vol / local_avg_vol) if local_avg_vol > 0 else 1.0
+                volume_confirmed = volume_ratio >= 1.5    # >= 1.5× local avg = institutional
+            else:
+                ob_vol           = 0.0
+                volume_ratio     = 1.0
+                volume_confirmed = False
+
+            # ---- OB + FVG Confluence: % overlap of OB zone with unmitigated FVG zones ----
+            ob_fvg_overlap_pct = 0.0
+            if fvg and ob_range > 0:
+                for fvg_entry in fvg.get("fvg_levels", []):
+                    if fvg_entry.get("mitigated"):
+                        continue
+                    fvg_h     = fvg_entry["high"]
+                    fvg_l     = fvg_entry["low"]
+                    overlap_h = min(ob_high, fvg_h)
+                    overlap_l = max(ob_low,  fvg_l)
+                    if overlap_h > overlap_l:
+                        pct = round(((overlap_h - overlap_l) / ob_range) * 100, 1)
+                        if pct > ob_fvg_overlap_pct:
+                            ob_fvg_overlap_pct = min(pct, 100.0)
+
+            # ---- Mitigation Flagging (Used OB) ----
+            # Post-impulse candles: indices -(i-1) through -1 (after the first
+            # impulse candle at move_idx=-i). range(1, i) gives j=1..i-1.
+            post_closes = [close[-(j)] for j in range(1, i)]
+            post_lows   = [low[-(j)]   for j in range(1, i)]
+            post_highs  = [high[-(j)]  for j in range(1, i)]
+
+            # Mitigated by close: a post-impulse candle closed inside the OB zone
+            mitigated_by_close = any(ob_low <= c <= ob_high for c in post_closes)
+            # Mitigated by wick: a post-impulse candle's range overlapped the OB zone
+            mitigated_by_wick  = any(
+                lo <= ob_high and hi >= ob_low
+                for lo, hi in zip(post_lows, post_highs)
+            )
+            mitigated = mitigated_by_close or mitigated_by_wick
+
+            # ================================================================
+            # BUILD THE OB ENTRY DICT (shared base for both directions)
+            # ================================================================
+            ob_candle_base = {
+                "high":               ob_high,
+                "low":                ob_low,
+                "open":               float(open_p[ob_idx]),
+                "close":              float(close[ob_idx]),
+                "level":              float((ob_high + ob_low) / 2),
+                # --- Mitigation ---
+                "mitigated":          mitigated,
+                "mitigated_by_close": mitigated_by_close,
+                "mitigated_by_wick":  mitigated_by_wick,
+                # --- Quality Score ---
+                "quality_score":      quality_score,
+                "body_ratio":         round(body_ratio, 3),
+                # --- Rejection Block ---
+                "is_rejection_block": is_rejection,
+                # --- Volume OFI ---
+                "volume_ratio":       round(volume_ratio, 3),
+                "volume_confirmed":   volume_confirmed,
+                # --- OB+FVG Confluence ---
+                "ob_fvg_overlap_pct": ob_fvg_overlap_pct,
+            }
+
             # Bullish OB: OB candle is bearish, followed by strong bullish impulse
             if (open_p[ob_idx] > close[ob_idx]             # OB candle bearish
                     and close[move_idx] > open_p[move_idx] # impulse bullish
                     and move_body_ratio > 0.55              # strong body
                     and close[move_idx] > high[ob_idx]):    # closes above OB high
-                ob_candle = {
-                    "type":  "bullish",
-                    "high":  float(high[ob_idx]),
-                    "low":   float(low[ob_idx]),
-                    "open":  float(open_p[ob_idx]),
-                    "close": float(close[ob_idx]),
-                    "level": float((high[ob_idx] + low[ob_idx]) / 2),
-                }
-                if result["bullish_ob"] is None:
-                    result["bullish_ob"] = ob_candle
+                ob_candle = {**ob_candle_base, "type": "bullish"}
                 result["ob_levels"].append(ob_candle)
+
+                if mitigated:
+                    result["mitigated_obs"].append(ob_candle)
+                else:
+                    # First (most recent) non-mitigated bullish OB is the primary entry zone
+                    if result["bullish_ob"] is None:
+                        result["bullish_ob"] = ob_candle
+                    # Rejection block (first non-mitigated bullish rejection block)
+                    if is_rejection and result["rejection_block_bullish"] is None:
+                        result["rejection_block_bullish"] = ob_candle
+                        result["rejection_block_levels"].append(ob_candle)
+                    # Volume confirmation roll-up
+                    if volume_confirmed:
+                        result["volume_confirmed_bullish"] = True
+                    # OB+FVG confluence roll-up (track highest overlap found)
+                    if ob_fvg_overlap_pct > result["ob_fvg_confluence_pct"]:
+                        result["ob_fvg_confluence_pct"]  = ob_fvg_overlap_pct
+                        result["has_ob_fvg_confluence"]  = ob_fvg_overlap_pct > 0.0
 
             # Bearish OB: OB candle is bullish, followed by strong bearish impulse
             elif (open_p[ob_idx] < close[ob_idx]            # OB candle bullish
                     and close[move_idx] < open_p[move_idx]  # impulse bearish
                     and move_body_ratio > 0.55               # strong body
                     and close[move_idx] < low[ob_idx]):      # closes below OB low
-                ob_candle = {
-                    "type":  "bearish",
-                    "high":  float(high[ob_idx]),
-                    "low":   float(low[ob_idx]),
-                    "open":  float(open_p[ob_idx]),
-                    "close": float(close[ob_idx]),
-                    "level": float((high[ob_idx] + low[ob_idx]) / 2),
-                }
-                if result["bearish_ob"] is None:
-                    result["bearish_ob"] = ob_candle
+                ob_candle = {**ob_candle_base, "type": "bearish"}
                 result["ob_levels"].append(ob_candle)
+
+                if mitigated:
+                    result["mitigated_obs"].append(ob_candle)
+                else:
+                    # First (most recent) non-mitigated bearish OB is the primary entry zone
+                    if result["bearish_ob"] is None:
+                        result["bearish_ob"] = ob_candle
+                    # Rejection block (first non-mitigated bearish rejection block)
+                    if is_rejection and result["rejection_block_bearish"] is None:
+                        result["rejection_block_bearish"] = ob_candle
+                        result["rejection_block_levels"].append(ob_candle)
+                    # Volume confirmation roll-up
+                    if volume_confirmed:
+                        result["volume_confirmed_bearish"] = True
+                    # OB+FVG confluence roll-up
+                    if ob_fvg_overlap_pct > result["ob_fvg_confluence_pct"]:
+                        result["ob_fvg_confluence_pct"] = ob_fvg_overlap_pct
+                        result["has_ob_fvg_confluence"] = ob_fvg_overlap_pct > 0.0
 
         # ================================================================
         # STEP 2 -- Breaker Block detection
@@ -594,13 +1243,17 @@ class AnalysisEngine:
         # STEP 3 -- Retest detection
         # Price is retesting a bullish OB if the current candle's low dips into
         # the OB zone but the close holds above OB low (touched, not broken).
-        # Mirror logic for bearish OB. Only unbroken OBs are checked.
+        # Mirror logic for bearish OB.
+        # Only non-broken AND non-mitigated OBs qualify (mitigated OBs are used
+        # zones — retesting them doesn't count as a fresh setup).
         # ================================================================
         breaker_keys = {(b["high"], b["low"]) for b in result["breaker_levels"]}
 
         for ob in result["ob_levels"]:
             if (ob["high"], ob["low"]) in breaker_keys:
-                continue   # already a breaker -- skip
+                continue   # already a breaker — skip
+            if ob.get("mitigated"):
+                continue   # used/mitigated OB — skip
 
             if ob["type"] == "bullish":
                 if low[-1] <= ob["high"] and close[-1] >= ob["low"]:
@@ -1000,6 +1653,25 @@ class AnalysisEngine:
         if ict.get("last_swing_high") is not None or ict.get("last_swing_low") is not None:
             score += 2   # structural reference points are present
 
+        # Extended ICT/SMC confluence (new sub-concepts added to Tool 1).
+        # NOTE: since these add new points on top of the existing formula,
+        # the score distribution has shifted vs. whatever calibration_table.json
+        # was built from - re-run backtest_calibration.py to refresh it.
+        if ict.get("smt_bullish_divergence") or ict.get("smt_bearish_divergence"):
+            score += 6    # SMT divergence -- top-tier reversal confluence
+        if ict.get("in_kill_zone"):
+            score += 2    # inside a historically higher-probability session window
+        if ict.get("macro_break_bullish") or ict.get("macro_break_bearish"):
+            score += 5    # daily/weekly macro level broken
+        if ict.get("unicorn_bullish") or ict.get("unicorn_bearish"):
+            score += 6    # Unicorn Model -- FVG + OB + sweep confluence
+        if ict.get("inverse_fairy_tale_bullish") or ict.get("inverse_fairy_tale_bearish"):
+            score += 3    # swept level closed back beyond it -- continuation
+        if ict.get("old_level_support") is not None or ict.get("old_level_resistance") is not None:
+            score += 2    # reacting off an old (1-6 month) high/low
+        if ict.get("wyckoff_breakout_bullish") or ict.get("wyckoff_breakout_bearish"):
+            score += 4    # accumulation/distribution range breakout confirmed
+
         # Tool 2 -- FVG confluence (up to ~18 points)
         fvg = results.get("fvg", {})
         if (fvg.get("bullish_fvg") or fvg.get("bearish_fvg")) and not fvg.get("mitigated"):
@@ -1009,14 +1681,36 @@ class AnalysisEngine:
         if fvg.get("atr") is not None:
             score += 4    # ATR filter was active (gaps are institutionally significant)
 
-        # Tool 3 -- Order Block confluence (up to ~18 points)
+        # Extended FVG concepts (new sub-concepts added to Tool 2)
+        if fvg.get("ce_entry_bullish") or fvg.get("ce_entry_bearish"):
+            score += 4    # price trading at the Consequent Encroachment (50%) of a fresh FVG
+        if fvg.get("stacked_bullish") or fvg.get("stacked_bearish"):
+            score += 5    # FVG stacking -- repeated same-direction Order Flow Imbalance
+        if fvg.get("has_weekend_gap"):
+            score += 2    # a genuine weekend/raw gap is present as an extra reference level
+
+        # Tool 3 -- Order Block confluence (up to ~30 points)
         ob = results.get("order_block", {})
         if ob.get("bullish_ob") or ob.get("bearish_ob"):
-            score += 6    # valid OB identified
+            score += 6    # valid, unmitigated OB identified (mitigated OBs excluded)
         if ob.get("retest_bullish") or ob.get("retest_bearish"):
             score += 7    # price is actively retesting the OB -- entry zone
         if ob.get("breaker_bullish") or ob.get("breaker_bearish"):
             score += 5    # breaker block present -- flipped OB re-entry zone
+
+        # New OB sub-concepts (Tool 3 additions)
+        if ob.get("rejection_block_bullish") or ob.get("rejection_block_bearish"):
+            score += 3    # Rejection Block: large-wick OB candle -- strong reversal signal
+        if ob.get("has_ob_fvg_confluence"):
+            # OB + FVG Overlap: scale +0 to +4 pts based on % overlap (100% overlap = +4)
+            overlap_pct = ob.get("ob_fvg_confluence_pct", 0.0)
+            score += min(overlap_pct / 25.0, 4.0)
+        if ob.get("volume_confirmed_bullish") or ob.get("volume_confirmed_bearish"):
+            score += 3    # Order Flow Imbalance: OB formed on above-avg volume (institutional)
+        # OB Quality Score: active OB with body > 60% of range = strong (clean impulse origin)
+        _active_ob = ob.get("bullish_ob") or ob.get("bearish_ob")
+        if _active_ob and _active_ob.get("quality_score", 0) > 60:
+            score += 2    # strong-body OB (quality_score > 60)
 
         # Tool 4 -- Liquidity confluence (up to ~18 points)
         liq = results.get("liquidity", {})
@@ -1144,14 +1838,33 @@ class AnalysisEngine:
         return True, f"{direction} signal | {agreeing_tools}/5 tools | {profit_chance:.1f}% profit chance"
     
     def multi_timeframe_analysis(self, ohlc_data: Dict[str, pd.DataFrame]) -> Dict:
-        """Analyze all 3 timeframes with weighted decision"""
+        """
+        Analyze all 3 timeframes with weighted decision.
+
+        ohlc_data may OPTIONALLY also contain:
+          - "correlated": {"higher": df, "medium": df, "lower": df} - the
+            SMT-divergence reference symbol's candles on matching timeframes.
+          - "daily": df - daily candles used for Macro Structure / Old
+            Highs-Lows.
+        Both are purely additive. Callers that only pass "higher"/"medium"/
+        "lower" (e.g. the existing backtest scripts) are completely
+        unaffected - those extra Tool 1 sub-features just don't trigger.
+        """
         results = {}
-        
+
+        correlated_data = ohlc_data.get("correlated") if isinstance(ohlc_data, dict) else None
+        daily_ohlc = ohlc_data.get("daily") if isinstance(ohlc_data, dict) else None
+
         for tf_name in ["higher", "medium", "lower"]:
             if tf_name in ohlc_data and ohlc_data[tf_name] is not None:
                 df = ohlc_data[tf_name]
                 if len(df) >= 50:
-                    results[tf_name] = self.calculate_all_indicators(df)
+                    corr_df = None
+                    if isinstance(correlated_data, dict):
+                        corr_df = correlated_data.get(tf_name)
+                    results[tf_name] = self.calculate_all_indicators(
+                        df, correlated_ohlc=corr_df, daily_ohlc=daily_ohlc
+                    )
                 else:
                     results[tf_name] = {"signal": 0, "confidence": 0, "profit_chance": 0}
             else:
@@ -1285,11 +1998,4 @@ class AnalysisEngine:
                             sentiment -= 1
                 
                 max_possible = len(articles) * 2
-                if max_possible > 0:
-                    normalized = sentiment / max_possible
-                    return max(min(normalized, 1.0), -1.0)
-                    
-        except Exception as e:
-            logger.error(f"News API error: {e}")
-        
-        return 0.0
+                
