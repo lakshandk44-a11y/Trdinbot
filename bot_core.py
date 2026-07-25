@@ -561,7 +561,70 @@ class HackerAIBot:
 
         if "higher" not in result or result["higher"] is None:
             return None
+
+        # ---- Extended Tool 1 context (SMT Divergence / Macro Structure /
+        # Old Highs-Lows) -----------------------------------------------
+        # This is ADDITIVE and fully isolated in its own try/except: if any
+        # of it fails for any reason, the "higher"/"medium"/"lower" result
+        # built above is returned exactly as before, and Tool 1's extended
+        # sub-features simply don't trigger for this scan (identical to how
+        # the missing calibration_table.json is handled elsewhere).
+        if self.config.get("SMT_DIVERGENCE_ENABLED", True):
+            try:
+                corr_symbol = self._get_smt_correlated_symbol(symbol)
+                correlated = {}
+                for tf_name, tf_interval in TIMEFRAMES.items():
+                    limit = {"4h": 100, "1h": 150, "15m": 200}.get(tf_interval, 100)
+                    try:
+                        c_klines = self.client.klines(symbol=corr_symbol, interval=tf_interval, limit=limit)
+                    except Exception:
+                        c_klines = None
+                    if c_klines:
+                        c_df = pd.DataFrame(c_klines, columns=[
+                            "timestamp", "open", "high", "low", "close", "volume",
+                            "close_time", "quote_asset_volume", "trades",
+                            "taker_buy_base", "taker_buy_quote", "ignore"
+                        ])
+                        for col in ["open", "high", "low", "close", "volume"]:
+                            c_df[col] = pd.to_numeric(c_df[col], errors="coerce")
+                        correlated[tf_name] = c_df
+                    else:
+                        correlated[tf_name] = None
+                result["correlated"] = correlated
+            except Exception as e:
+                logger.debug(f"SMT correlated-symbol fetch skipped for {symbol}: {e}")
+
+        try:
+            daily_limit = self.config.get("DAILY_HISTORY_CANDLES", 200)
+            d_klines = self.client.klines(symbol=symbol, interval="1d", limit=daily_limit)
+            if d_klines:
+                daily_df = pd.DataFrame(d_klines, columns=[
+                    "timestamp", "open", "high", "low", "close", "volume",
+                    "close_time", "quote_asset_volume", "trades",
+                    "taker_buy_base", "taker_buy_quote", "ignore"
+                ])
+                for col in ["open", "high", "low", "close", "volume"]:
+                    daily_df[col] = pd.to_numeric(daily_df[col], errors="coerce")
+                result["daily"] = daily_df
+        except Exception as e:
+            logger.debug(f"Daily-candle fetch skipped for {symbol} "
+                         f"(macro structure / old highs-lows will no-op this scan): {e}")
+
         return result
+
+    def _get_smt_correlated_symbol(self, symbol: str) -> str:
+        """
+        Pick the correlated pair used for SMT (Smart Money Technique)
+        Divergence. ICT's classic reference pair is BTC vs ETH: use BTCUSDT
+        as the correlated reference for every symbol, and fall back to
+        ETHUSDT when the symbol being scanned IS BTCUSDT itself.
+        """
+        correlated_map = self.config.get("SMT_CORRELATED_MAP", {})
+        if symbol in correlated_map:
+            return correlated_map[symbol]
+        if symbol == "BTCUSDT":
+            return "ETHUSDT"
+        return "BTCUSDT"
 
     def _get_analysis_based_tp_sl(self, symbol: str, side: str, entry_price: float,
                                    analysis: Dict) -> Tuple[Optional[float], Optional[float]]:
@@ -634,6 +697,24 @@ class HackerAIBot:
                 resistance_candidates.append((liq["buyside_liquidity"], liq_strength))
             if liq.get("sellside_liquidity"):
                 support_candidates.append((liq["sellside_liquidity"], liq_strength))
+
+            # Extended Tool 1 levels (Macro Structure + Old Highs/Lows).
+            # Weighted as fixed fractions of entry_price, same pattern as
+            # the liquidity weighting above, reflecting ICT's own hierarchy:
+            # weekly > daily > old (1-6 month) swing levels.
+            ict = tf.get("ict_smc", {})
+            if ict.get("pdh") is not None:
+                resistance_candidates.append((ict["pdh"], entry_price * 0.008))
+            if ict.get("pdl") is not None:
+                support_candidates.append((ict["pdl"], entry_price * 0.008))
+            if ict.get("pwh") is not None:
+                resistance_candidates.append((ict["pwh"], entry_price * 0.015))
+            if ict.get("pwl") is not None:
+                support_candidates.append((ict["pwl"], entry_price * 0.015))
+            for lvl in ict.get("old_highs", []):
+                resistance_candidates.append((lvl, entry_price * 0.006))
+            for lvl in ict.get("old_lows", []):
+                support_candidates.append((lvl, entry_price * 0.006))
 
         if side == "BUY":
             tp_pool = [(lvl, s) for lvl, s in resistance_candidates if lvl > entry_price]
