@@ -40,7 +40,7 @@ import pandas as pd
 
 from config import (
     BINANCE_API_KEY, BINANCE_API_SECRET, BINANCE_TESTNET,
-    TOP_40_COINS, TIMEFRAMES, MIN_TOOLS_MATCH, MIN_SUBCONCEPTS_PER_TOOL,
+    TOP_N_COINS, TIMEFRAMES, MIN_TOOLS_MATCH, MIN_SUBCONCEPTS_PER_TOOL,
     TAKE_PROFIT_PERCENT, STOP_LOSS_PERCENT,
     SMT_DIVERGENCE_ENABLED, SMT_CORRELATED_MAP, DAILY_HISTORY_CANDLES,
     OLD_HIGH_LOW_MIN_DAYS, OLD_HIGH_LOW_MAX_DAYS,
@@ -328,14 +328,14 @@ def summarize(records: List[Dict]) -> Dict:
 def main():
     parser = argparse.ArgumentParser(description="Backtest analysis-based dynamic TP/SL against the fixed-percent baseline")
     parser.add_argument("--symbols", type=str, default=None,
-                         help="Comma-separated symbols (default: TOP_40_COINS from config.py)")
+                         help="Comma-separated symbols (default: TOP_N_COINS from config.py)")
     parser.add_argument("--months", type=int, default=9,
                          help="Months of history to backtest (default: 9)")
     parser.add_argument("--output", type=str, default=OUTPUT_FILE,
                          help=f"Output file path (default: {OUTPUT_FILE})")
     args = parser.parse_args()
 
-    symbols = args.symbols.split(",") if args.symbols else TOP_40_COINS
+    symbols = args.symbols.split(",") if args.symbols else TOP_N_COINS
 
     client = BinanceFuturesClient(BINANCE_API_KEY, BINANCE_API_SECRET, testnet=BINANCE_TESTNET)
 
