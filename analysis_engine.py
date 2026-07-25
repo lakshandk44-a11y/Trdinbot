@@ -69,44 +69,143 @@ class AnalysisEngine:
         results["liquidity"] = liquidity_result
         results["market_structure"] = ms_result
         
-        # Count how many tools agree on direction
+        # ================================================================
+        # TOOLS AGREEMENT (bullish_tools / bearish_tools, out of 5)
+        #
+        # Each of the 5 tools above independently detects several distinct
+        # named sub-concepts (Tool 1: BOS, CHoCH, MSS, SMT Divergence, Macro
+        # Break, Unicorn Model, Inverse Fairy Tale, Old High/Low reaction,
+        # Wyckoff breakout; Tool 2: fresh FVG, CE-zone entry, FVG stacking,
+        # IFVG; Tool 3: fresh OB, Breaker Block, Retest, Rejection Block,
+        # Volume-confirmed OB; Tool 4: external sweep, internal sweep, EQH/
+        # EQL sweep; Tool 5: swing-structure trend, BOS/CHoCH, EMA alignment).
+        # A tool only counts toward bullish_tools/bearish_tools if AT LEAST
+        # MIN_SUBCONCEPTS_PER_TOOL of ITS OWN sub-concepts agree on the same
+        # direction at the same time - one lone sub-signal firing inside a
+        # tool is no longer enough, on its own, to swing that tool's vote.
+        # None of the detection thresholds/logic inside the 5 tools were
+        # changed by this - only how many of a tool's own concepts must
+        # agree before that tool's single vote counts in the outer 5-tool
+        # vote (which itself is still governed by MIN_TOOLS_MATCH, unchanged).
+        # ================================================================
+        min_sub = self.config.get("MIN_SUBCONCEPTS_PER_TOOL", 2)
+
         results["bullish_tools"] = 0
         results["bearish_tools"] = 0
         results["tools_agreeing"] = 0
         results["total_active_tools"] = 5
-        
-        # Tool 1
-        if results["ict_smc"].get("bullish"):
+
+        # ---- Tool 1: ICT/SMC ----
+        ict = results["ict_smc"]
+        ict_bull = sum([
+            ict.get("bos_direction") == "bullish",
+            ict.get("choch_direction") == "bullish",
+            ict.get("mss_direction") == "bullish",
+            bool(ict.get("smt_bullish_divergence")),
+            bool(ict.get("macro_break_bullish")),
+            bool(ict.get("unicorn_bullish")),
+            bool(ict.get("inverse_fairy_tale_bullish")),
+            ict.get("old_level_support") is not None,
+            bool(ict.get("wyckoff_breakout_bullish")),
+        ])
+        ict_bear = sum([
+            ict.get("bos_direction") == "bearish",
+            ict.get("choch_direction") == "bearish",
+            ict.get("mss_direction") == "bearish",
+            bool(ict.get("smt_bearish_divergence")),
+            bool(ict.get("macro_break_bearish")),
+            bool(ict.get("unicorn_bearish")),
+            bool(ict.get("inverse_fairy_tale_bearish")),
+            ict.get("old_level_resistance") is not None,
+            bool(ict.get("wyckoff_breakout_bearish")),
+        ])
+        ict["bullish_subconcepts"], ict["bearish_subconcepts"] = ict_bull, ict_bear
+        if ict_bull >= min_sub and ict_bull > ict_bear:
             results["bullish_tools"] += 1
-        elif results["ict_smc"].get("bearish"):
+        elif ict_bear >= min_sub and ict_bear > ict_bull:
             results["bearish_tools"] += 1
-        
-        # Tool 2
-        if results["fvg"].get("bullish_fvg") and not results["fvg"].get("mitigated"):
+
+        # ---- Tool 2: FVG ----
+        fvg = results["fvg"]
+        fvg_bull = sum([
+            bool(fvg.get("bullish_fvg")) and not fvg.get("mitigated"),
+            bool(fvg.get("ce_entry_bullish")),
+            bool(fvg.get("stacked_bullish")),
+            bool(fvg.get("ifvg_bullish")),
+        ])
+        fvg_bear = sum([
+            bool(fvg.get("bearish_fvg")) and not fvg.get("mitigated"),
+            bool(fvg.get("ce_entry_bearish")),
+            bool(fvg.get("stacked_bearish")),
+            bool(fvg.get("ifvg_bearish")),
+        ])
+        fvg["bullish_subconcepts"], fvg["bearish_subconcepts"] = fvg_bull, fvg_bear
+        if fvg_bull >= min_sub and fvg_bull > fvg_bear:
             results["bullish_tools"] += 1
-        elif results["fvg"].get("bearish_fvg") and not results["fvg"].get("mitigated"):
+        elif fvg_bear >= min_sub and fvg_bear > fvg_bull:
             results["bearish_tools"] += 1
-        
-        # Tool 3
-        if results["order_block"].get("bullish_ob"):
+
+        # ---- Tool 3: Order Block ----
+        ob = results["order_block"]
+        ob_bull = sum([
+            ob.get("bullish_ob") is not None,
+            ob.get("breaker_bullish") is not None,
+            bool(ob.get("retest_bullish")),
+            ob.get("rejection_block_bullish") is not None,
+            bool(ob.get("volume_confirmed_bullish")),
+        ])
+        ob_bear = sum([
+            ob.get("bearish_ob") is not None,
+            ob.get("breaker_bearish") is not None,
+            bool(ob.get("retest_bearish")),
+            ob.get("rejection_block_bearish") is not None,
+            bool(ob.get("volume_confirmed_bearish")),
+        ])
+        ob["bullish_subconcepts"], ob["bearish_subconcepts"] = ob_bull, ob_bear
+        if ob_bull >= min_sub and ob_bull > ob_bear:
             results["bullish_tools"] += 1
-        elif results["order_block"].get("bearish_ob"):
+        elif ob_bear >= min_sub and ob_bear > ob_bull:
             results["bearish_tools"] += 1
-        
-        # Tool 4
+
+        # ---- Tool 4: Liquidity ----
+        # NOTE: a SELLSIDE sweep (lows swept) is the bullish signal (stop-hunt
+        # of shorts before reversal up) and a BUYSIDE sweep (highs swept) is
+        # the bearish signal - same convention the original code used.
         liq = results["liquidity"]
-        if liq.get("recent_sweep") == "sellside":
+        liq_bull = sum([
+            bool(liq.get("ext_sellside_swept")),
+            bool(liq.get("int_sellside_swept")),
+            bool(liq.get("eql_swept")),
+        ])
+        liq_bear = sum([
+            bool(liq.get("ext_buyside_swept")),
+            bool(liq.get("int_buyside_swept")),
+            bool(liq.get("eqh_swept")),
+        ])
+        liq["bullish_subconcepts"], liq["bearish_subconcepts"] = liq_bull, liq_bear
+        if liq_bull >= min_sub and liq_bull > liq_bear:
             results["bullish_tools"] += 1
-        elif liq.get("recent_sweep") == "buyside":
+        elif liq_bear >= min_sub and liq_bear > liq_bull:
             results["bearish_tools"] += 1
-        
-        # Tool 5
+
+        # ---- Tool 5: Market Structure ----
         ms = results["market_structure"]
-        if ms.get("trend") == "bullish" or ms.get("structure_broken") == "bullish":
+        ms_bull = sum([
+            ms.get("trend") == "bullish",
+            ms.get("structure_broken") == "bullish",
+            bool(ms.get("ema_bullish")),
+        ])
+        ms_bear = sum([
+            ms.get("trend") == "bearish",
+            ms.get("structure_broken") == "bearish",
+            bool(ms.get("ema_bearish")),
+        ])
+        ms["bullish_subconcepts"], ms["bearish_subconcepts"] = ms_bull, ms_bear
+        if ms_bull >= min_sub and ms_bull > ms_bear:
             results["bullish_tools"] += 1
-        elif ms.get("trend") == "bearish" or ms.get("structure_broken") == "bearish":
+        elif ms_bear >= min_sub and ms_bear > ms_bull:
             results["bearish_tools"] += 1
-        
+
         # Tools agreeing (maximum between bullish/bearish)
         results["tools_agreeing"] = max(results["bullish_tools"], results["bearish_tools"])
         
@@ -1300,6 +1399,21 @@ class AnalysisEngine:
             "internal_liquidity_low":  None,  # recent leg swing low  (internal)
             "internal_swept": False,     # internal level got swept
             "external_swept": False,     # external level got swept
+            # ---- Added for sub-concept voting only (see calculate_all_indicators) ----
+            # These record the SAME conditions already checked below, just
+            # without the "only if no external sweep already fired" early-exit
+            # that the original external_swept/internal_swept/recent_sweep
+            # fields use - so more than one of Tool 4's own sweep concepts can
+            # be counted at once when several genuinely co-occur. They do NOT
+            # change swept/recent_sweep/buyside_liquidity/sellside_liquidity/
+            # external_swept/internal_swept, which everything else (bot_core's
+            # TP/SL level picks, Tool 1's Unicorn Model) keeps using unchanged.
+            "ext_buyside_swept": False,
+            "ext_sellside_swept": False,
+            "int_buyside_swept": False,
+            "int_sellside_swept": False,
+            "eqh_swept": False,
+            "eql_swept": False,
         }
 
         if len(ohlc) < 30:
@@ -1409,12 +1523,14 @@ class AnalysisEngine:
             result["swept"]              = True
             result["recent_sweep"]       = "buyside"
             result["external_swept"]     = True
+            result["ext_buyside_swept"]  = True
 
         if ext_l is not None and low[-1] <= ext_l and close[-1] > ext_l:
             result["sellside_liquidity"] = ext_l
             result["swept"]              = True
             result["recent_sweep"]       = "sellside"
             result["external_swept"]     = True
+            result["ext_sellside_swept"] = True
 
         # -- Internal sweeps (only if no external sweep already confirmed) --
         int_h = result["internal_liquidity_high"]
@@ -1433,12 +1549,23 @@ class AnalysisEngine:
                 result["recent_sweep"]       = "sellside"
                 result["internal_swept"]     = True
 
+        # ext_*_swept/int_*_swept for the sub-concept tally: same conditions
+        # as above, computed unconditionally (not gated by "if not swept")
+        # so internal and external sweeps can both be counted if they both
+        # genuinely happened, even though only one becomes the "official"
+        # recent_sweep above.
+        if int_h is not None and high[-1] >= int_h and close[-1] < int_h:
+            result["int_buyside_swept"] = True
+        if int_l is not None and low[-1] <= int_l and close[-1] > int_l:
+            result["int_sellside_swept"] = True
+
         # -- EQH / EQL sweeps (also count as buy/sell-side sweeps) --
         for eqh_lvl in eqh_levels:
             if high[-1] >= eqh_lvl and close[-1] < eqh_lvl:
                 result["buyside_liquidity"] = eqh_lvl
                 result["swept"]             = True
                 result["recent_sweep"]      = "buyside"
+                result["eqh_swept"]         = True
                 break
 
         for eql_lvl in eql_levels:
@@ -1446,6 +1573,7 @@ class AnalysisEngine:
                 result["sellside_liquidity"] = eql_lvl
                 result["swept"]              = True
                 result["recent_sweep"]       = "sellside"
+                result["eql_swept"]          = True
                 break
 
         return result
@@ -1476,6 +1604,9 @@ class AnalysisEngine:
             "last_bos_direction": None,
             # ---- New field ----
             "confidence":        0.0,   # 0.0 - 1.0 structural confidence score
+            # ---- Added for sub-concept voting only (see calculate_all_indicators) ----
+            "ema_bullish": False,
+            "ema_bearish": False,
         }
 
         if len(ohlc) < 20:
@@ -1517,6 +1648,8 @@ class AnalysisEngine:
         ema_long  = np.mean(close[-30:]) if len(close) >= 30 else np.mean(close)
         ema_bullish = ema_short > ema_long * 1.003
         ema_bearish = ema_short < ema_long * 0.997
+        result["ema_bullish"] = bool(ema_bullish)
+        result["ema_bearish"] = bool(ema_bearish)
 
         if bullish_score > bearish_score and ema_bullish:
             result["trend"] = "bullish"
