@@ -77,7 +77,12 @@ WAIT_FOR_BALANCE = True  # Balance à¶±à·à¶­à·’ à·€à·™à¶�
 # ============================================================
 # TOP 40 COINS (Binance USDT Perpetual Futures)
 # ============================================================
-TOP_40_COINS = [
+TOP_N_COIN_COUNT = 50  # FIX (user request, was 40): how many coins the live
+# top-by-volume fetch (bot_core._get_top_coins) pulls from Binance each scan.
+# TOP_N_COINS below is only the STATIC FALLBACK list used if that live fetch
+# fails entirely - it's kept the same length (50) so the fallback behaves
+# identically to the normal (live) path either way.
+TOP_N_COINS = [
     "BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT",
     "SOLUSDT", "DOGEUSDT", "DOTUSDT", "MATICUSDT", "1000SHIBUSDT",  # FIX: SHIBUSDT doesn't exist on Binance Futures - it's listed as 1000SHIBUSDT
     "AVAXUSDT", "LINKUSDT", "UNIUSDT", "ATOMUSDT", "LTCUSDT",
@@ -85,7 +90,15 @@ TOP_40_COINS = [
     "FILUSDT", "TRXUSDT", "NEARUSDT", "SANDUSDT", "MANAUSDT",
     "APEUSDT", "AXSUSDT", "THETAUSDT", "FTMUSDT", "EGLDUSDT",
     "HBARUSDT", "ICPUSDT", "XMRUSDT", "EOSUSDT", "AAVEUSDT",
-    "CAKEUSDT", "KLAYUSDT", "ARUSDT", "CRVUSDT", "GRTUSDT"
+    "CAKEUSDT", "KLAYUSDT", "ARUSDT", "CRVUSDT", "GRTUSDT",
+    # FIX (user request): 10 more added to go from 40 -> 50. Same rule as the
+    # rest of this list - all are commonly-listed, liquid Binance USDT-M
+    # futures pairs - but since this is only a fallback (the live top-by-
+    # volume fetch is what actually runs every scan), double-check each
+    # symbol is still listed on your account's Binance Futures before
+    # relying on this fallback path.
+    "OPUSDT", "ARBUSDT", "SUIUSDT", "APTUSDT", "INJUSDT",
+    "RUNEUSDT", "DYDXUSDT", "LDOUSDT", "STXUSDT", "GALAUSDT",
 ]
 
 # ============================================================
