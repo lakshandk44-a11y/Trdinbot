@@ -402,7 +402,7 @@ class HackerAIBot:
                     time.sleep(self.config.get("BALANCE_CHECK_INTERVAL", 60))
                     continue
 
-                # Get top 40 coins
+                # Get top-N coins (TOP_N_COIN_COUNT, default 50)
                 coins_to_scan = self._get_top_coins()
 
                 # Scan all coins 24/7
@@ -464,15 +464,16 @@ class HackerAIBot:
             return False
 
     def _get_top_coins(self) -> List[str]:
-        """Get top 40 coins from Binance by volume"""
-        coins = self.config.get("TOP_40_COINS", TOP_40_COINS)
+        """Get top-N coins from Binance by volume (N = TOP_N_COIN_COUNT, default 50)"""
+        coins = self.config.get("TOP_N_COINS", TOP_N_COINS)
         try:
             tickers = self.client.ticker_24hr()
             usdt_pairs = [t for t in tickers if t["symbol"].endswith("USDT")]
             sorted_by_volume = sorted(usdt_pairs, key=lambda x: float(x["quoteVolume"]), reverse=True)
-            top_40 = [t["symbol"] for t in sorted_by_volume[:40]]
-            if top_40:
-                coins = top_40
+            top_n = self.config.get("TOP_N_COIN_COUNT", 50)
+            top_coins = [t["symbol"] for t in sorted_by_volume[:top_n]]
+            if top_coins:
+                coins = top_coins
         except Exception:
             pass
         return coins
@@ -912,12 +913,28 @@ class HackerAIBot:
 
             # FIX (trailing stop redesign): capture ATR(14) at entry so the
             # trailing stop distance can adapt to THIS coin's actual
-            # volatility instead of using one fixed % for all 40 coins
+            # volatility instead of using one fixed % for all scanned coins
             # (see trade_manager._evaluate_trade for how this is used).
             entry_atr = None
             if analysis:
                 entry_atr = (analysis.get("lower", {}).get("fvg", {}).get("atr")
                              or analysis.get("medium", {}).get("fvg", {}).get("atr"))
+
+            # FIX (user request): capture WHICH of the 5 tools agreed and
+            # WHICH of their own sub-concepts fired, per timeframe, purely
+            # for display in the "Trade Opened" Telegram message. Read-only
+            # summary of the exact same already-computed fields the real
+            # vote uses (see AnalysisEngine.describe_agreement) - changes
+            # no decision/entry logic at all.
+            tool_breakdown = {}
+            if analysis:
+                trade_direction = signal.get("direction", 1 if decision == "BUY" else -1)
+                for tf_name in ("higher", "medium", "lower"):
+                    tf_result = analysis.get(tf_name)
+                    if tf_result:
+                        tool_breakdown[tf_name] = self.analysis_engine.describe_agreement(
+                            tf_result, trade_direction
+                        )
 
             trade = self.trade_manager.open_new_trade(
                 symbol=symbol,
@@ -934,6 +951,7 @@ class HackerAIBot:
                     "position_value": final_position,
                     "min_notional": coin_min_notional,
                     "entry_atr": entry_atr,
+                    "tool_breakdown": tool_breakdown,
                 },
                 dynamic_tp=dynamic_tp,
                 dynamic_sl=dynamic_sl
