@@ -2099,6 +2099,88 @@ class AnalysisEngine:
             "direction": 1 if decision == "BUY" else (-1 if decision == "SELL" else 0)
         }
     
+    def describe_agreement(self, results: Dict, direction: int) -> List[Dict]:
+        """
+        FIX (user request): human-readable summary of WHICH of the 5 tools
+        agreed with a given direction on one timeframe's already-computed
+        `results` (the output of calculate_all_indicators), and WHICH named
+        sub-concepts inside each of those tools fired - for display in the
+        "Trade Opened" Telegram message. Purely a read-only summary of
+        fields that already exist on `results` (the exact same fields used
+        for the bullish_tools/bearish_tools vote) - changes no detection or
+        decision logic at all.
+
+        direction: 1 for bullish/BUY, -1 for bearish/SELL.
+        Returns a list of {"tool": <display name>, "subconcepts": [names]}
+        for only the tools that agreed with `direction` (using the same
+        MIN_SUBCONCEPTS_PER_TOOL-gated agreement as the real vote).
+        """
+        want_bull = direction == 1
+        out = []
+
+        ict = results.get("ict_smc", {})
+        ict_names = {
+            "BOS": ict.get("bos_direction") == ("bullish" if want_bull else "bearish"),
+            "CHoCH": ict.get("choch_direction") == ("bullish" if want_bull else "bearish"),
+            "MSS": ict.get("mss_direction") == ("bullish" if want_bull else "bearish"),
+            "SMT Divergence": bool(ict.get("smt_bullish_divergence" if want_bull else "smt_bearish_divergence")),
+            "Macro Break": bool(ict.get("macro_break_bullish" if want_bull else "macro_break_bearish")),
+            "Unicorn Model": bool(ict.get("unicorn_bullish" if want_bull else "unicorn_bearish")),
+            "Inverse Fairy Tale": bool(ict.get("inverse_fairy_tale_bullish" if want_bull else "inverse_fairy_tale_bearish")),
+            "Old " + ("Low Support" if want_bull else "High Resistance"):
+                ict.get("old_level_support" if want_bull else "old_level_resistance") is not None,
+            "Wyckoff Breakout": bool(ict.get("wyckoff_breakout_bullish" if want_bull else "wyckoff_breakout_bearish")),
+        }
+        ict_hits = [name for name, fired in ict_names.items() if fired]
+        min_sub = self.config.get("MIN_SUBCONCEPTS_PER_TOOL", 2)
+        if len(ict_hits) >= min_sub:
+            out.append({"tool": "ICT/SMC", "subconcepts": ict_hits})
+
+        fvg = results.get("fvg", {})
+        fvg_names = {
+            "Fresh FVG": bool(fvg.get("bullish_fvg" if want_bull else "bearish_fvg")) and not fvg.get("mitigated"),
+            "CE Entry": bool(fvg.get("ce_entry_bullish" if want_bull else "ce_entry_bearish")),
+            "FVG Stacking": bool(fvg.get("stacked_bullish" if want_bull else "stacked_bearish")),
+            "IFVG": bool(fvg.get("ifvg_bullish" if want_bull else "ifvg_bearish")),
+        }
+        fvg_hits = [name for name, fired in fvg_names.items() if fired]
+        if len(fvg_hits) >= min_sub:
+            out.append({"tool": "FVG", "subconcepts": fvg_hits})
+
+        ob = results.get("order_block", {})
+        ob_names = {
+            "Fresh OB": ob.get("bullish_ob" if want_bull else "bearish_ob") is not None,
+            "Breaker Block": ob.get("breaker_bullish" if want_bull else "breaker_bearish") is not None,
+            "Retest": bool(ob.get("retest_bullish" if want_bull else "retest_bearish")),
+            "Rejection Block": ob.get("rejection_block_bullish" if want_bull else "rejection_block_bearish") is not None,
+            "Volume Confirmed": bool(ob.get("volume_confirmed_bullish" if want_bull else "volume_confirmed_bearish")),
+        }
+        ob_hits = [name for name, fired in ob_names.items() if fired]
+        if len(ob_hits) >= min_sub:
+            out.append({"tool": "Order Block", "subconcepts": ob_hits})
+
+        liq = results.get("liquidity", {})
+        liq_names = {
+            "External Sweep": bool(liq.get("ext_sellside_swept" if want_bull else "ext_buyside_swept")),
+            "Internal Sweep": bool(liq.get("int_sellside_swept" if want_bull else "int_buyside_swept")),
+            "EQH/EQL Sweep": bool(liq.get("eql_swept" if want_bull else "eqh_swept")),
+        }
+        liq_hits = [name for name, fired in liq_names.items() if fired]
+        if len(liq_hits) >= min_sub:
+            out.append({"tool": "Liquidity", "subconcepts": liq_hits})
+
+        ms = results.get("market_structure", {})
+        ms_names = {
+            "Swing Trend": ms.get("trend") == ("bullish" if want_bull else "bearish"),
+            "BOS/CHoCH": ms.get("structure_broken") == ("bullish" if want_bull else "bearish"),
+            "EMA Alignment": bool(ms.get("ema_bullish" if want_bull else "ema_bearish")),
+        }
+        ms_hits = [name for name, fired in ms_names.items() if fired]
+        if len(ms_hits) >= min_sub:
+            out.append({"tool": "Market Structure", "subconcepts": ms_hits})
+
+        return out
+
     def _get_news_sentiment(self) -> float:
         """Get crypto news sentiment (-1.0 to 1.0)"""
         if not self.news_api_key or self.news_api_key == "YOUR_NEWS_API_KEY_HERE":
