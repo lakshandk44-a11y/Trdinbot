@@ -26,6 +26,16 @@ RISK_PER_TRADE = 0.02  # 2% risk per trade (for position sizing)
 # SIGNAL REQUIREMENTS (à¶”à¶¶à·š à¶…à¶½à·”à¶­à·Š conditions)
 # ============================================================
 MIN_TOOLS_MATCH = 4  # Tools 5à¶±à·Š à¶…à·€à¶¸ à¶œà·à¶½à¶´à·™à¶± à¶œà¶«à¶± (5/3 rule)
+MIN_SUBCONCEPTS_PER_TOOL = 2  # FIX (user request): each of the 5 tools has
+# many of its own named sub-concepts internally (Tool 1 alone has 9+: BOS,
+# CHoCH, MSS, SMT Divergence, Macro Break, Unicorn Model, Inverse Fairy Tale,
+# Old High/Low reaction, Wyckoff breakout). Previously a SINGLE sub-concept
+# firing was enough for that whole tool to count as "agreeing" toward
+# MIN_TOOLS_MATCH. Now a tool only counts if at least this many of ITS OWN
+# sub-concepts agree on the same direction at the same time - so
+# MIN_TOOLS_MATCH tools agreeing means each of those tools independently
+# analyzed its own full sub-concept dataset and still landed on the same
+# side, not just one lone weak signal per tool.
 MIN_PROFIT_CHANCE = 35.0  # FIX: calibration_table.json (27,042 real backtested
 # setups) shows NO score bucket ever reaches 65% real win-rate — the
 # highest bucket (90-100 raw score) only wins 51.7% of the time. Since
