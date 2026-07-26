@@ -84,7 +84,19 @@ def format_trade_opened(trade: dict) -> str:
     ._execute_trade). Falls back to the original simple message untouched
     if that breakdown isn't present (e.g. an older trade from before this
     change, still open across a bot restart).
+
+    FIX (user request): also shows WHICH entry path triggered this trade -
+    a single very-strong timeframe on its own ("Path A" /
+    single_tf_strong), or all 3 timeframes independently confirming
+    ("Path B" / all_tf_confirmed) - read from trade["analysis"]["entry_path"].
     """
+    entry_path = (trade.get("analysis") or {}).get("entry_path")
+    path_labels = {
+        "single_tf_strong": "🔥 Single Strong Timeframe",
+        "all_tf_confirmed": "✅ All 3 Timeframes Confirmed",
+    }
+    path_line = f"\nEntry Path: {path_labels.get(entry_path, 'Unknown')}" if entry_path in path_labels else ""
+
     header = (
         f"🟢 *TRADE OPENED*\n"
         f"Coin: {_md_safe(trade['symbol'])}  ({_md_safe(trade['side'])})\n"
@@ -92,6 +104,7 @@ def format_trade_opened(trade: dict) -> str:
         f"Take Profit: {trade['take_profit']:.8f}\n"
         f"Stop Loss: {trade['stop_loss']:.8f}\n"
         f"Qty: {trade['quantity']}  |  Leverage: {trade['leverage']}x"
+        f"{path_line}"
     )
 
     breakdown = (trade.get("analysis") or {}).get("tool_breakdown") or {}
