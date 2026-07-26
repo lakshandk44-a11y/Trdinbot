@@ -25,6 +25,14 @@ try:
 except Exception:
     _TELEGRAM_AVAILABLE = False
 
+# Optional Telegram remote-control panel (user request) - same fail-safe
+# pattern: if unavailable, the bot just runs without it, unaffected.
+try:
+    from telegram_control import TelegramController
+    _TELEGRAM_CONTROL_AVAILABLE = True
+except Exception:
+    _TELEGRAM_CONTROL_AVAILABLE = False
+
 from config import *
 from analysis_engine import AnalysisEngine
 from trade_manager import TradeManager
@@ -354,6 +362,16 @@ class HackerAIBot:
 
         logger.info("🤖 HackerAI Bot initialized (24/7 Mode)")
 
+        # Telegram remote control (user request) - safe toggles + pause/
+        # resume + status, admin-chat-only. Never blocks/crashes the bot
+        # if unavailable or misconfigured.
+        self.telegram_controller = None
+        if _TELEGRAM_CONTROL_AVAILABLE:
+            try:
+                self.telegram_controller = TelegramController(self, config)
+            except Exception as e:
+                logger.warning(f"⚠️ Telegram control panel could not be initialized: {e}")
+
     def start(self):
         """Start the bot"""
         if self.running:
@@ -361,8 +379,16 @@ class HackerAIBot:
             return
 
         self.running = True
-        self.paused = False
-        logger.info("🚀 HackerAI Bot STARTING in 24/7 mode...")
+        # FIX: this used to unconditionally reset self.paused = False here,
+        # which silently discarded a "paused" state restored from
+        # settings_override.json (via TelegramController, loaded earlier in
+        # __init__) every time the bot started/restarted - so pausing via
+        # Telegram, then having PM2 crash-restart the process, would
+        # silently un-pause it. self.paused already defaults to False at
+        # __init__ and is only ever True if a saved override explicitly set
+        # it - so it's left untouched here.
+        logger.info("🚀 HackerAI Bot STARTING in 24/7 mode..." +
+                    (" (resuming in PAUSED state from a saved setting)" if self.paused else ""))
 
         # FIX (Persistence Bug): cross-check any trades restored from disk
         # against what's actually open on Binance right now, in case
@@ -371,6 +397,12 @@ class HackerAIBot:
         self.trade_manager.reconcile_with_exchange()
 
         self.trade_manager.start_monitoring()
+
+        # FIX: TelegramController was being constructed in __init__ but its
+        # .start() (which actually spawns the polling thread) was never
+        # called - the control panel was built but silently never ran.
+        if self.telegram_controller:
+            self.telegram_controller.start()
 
         try:
             self._main_loop()
@@ -387,6 +419,8 @@ class HackerAIBot:
         """Stop the bot"""
         self.running = False
         self.trade_manager.stop_monitoring()
+        if self.telegram_controller:
+            self.telegram_controller.stop()
         logger.info("⏹️ HackerAI Bot STOPPED")
 
     def _main_loop(self):
