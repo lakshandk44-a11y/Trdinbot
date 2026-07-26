@@ -26,16 +26,31 @@ RISK_PER_TRADE = 0.02  # 2% risk per trade (for position sizing)
 # SIGNAL REQUIREMENTS (à¶”à¶¶à·š à¶…à¶½à·”à¶­à·Š conditions)
 # ============================================================
 MIN_TOOLS_MATCH = 4  # Tools 5à¶±à·Š à¶…à·€à¶¸ à¶œà·à¶½à¶´à·™à¶± à¶œà¶«à¶± (5/3 rule)
-MIN_SUBCONCEPTS_PER_TOOL = 2  # FIX (user request): each of the 5 tools has
-# many of its own named sub-concepts internally (Tool 1 alone has 9+: BOS,
-# CHoCH, MSS, SMT Divergence, Macro Break, Unicorn Model, Inverse Fairy Tale,
-# Old High/Low reaction, Wyckoff breakout). Previously a SINGLE sub-concept
-# firing was enough for that whole tool to count as "agreeing" toward
-# MIN_TOOLS_MATCH. Now a tool only counts if at least this many of ITS OWN
-# sub-concepts agree on the same direction at the same time - so
-# MIN_TOOLS_MATCH tools agreeing means each of those tools independently
-# analyzed its own full sub-concept dataset and still landed on the same
-# side, not just one lone weak signal per tool.
+MIN_SUBCONCEPTS_PER_TOOL = 1  # FIX (user request, reverted from 2): each of
+# the 5 tools has many of its own named sub-concepts internally (Tool 1
+# alone has 9+: BOS, CHoCH, MSS, SMT Divergence, Macro Break, Unicorn Model,
+# Inverse Fairy Tale, Old High/Low reaction, Wyckoff breakout). A tool only
+# counts as "agreeing" toward MIN_TOOLS_MATCH if at least this many of its
+# own sub-concepts agree on the same direction at the same time.
+# NOTE: this was set to 2 for a while, but combined with MIN_TOOLS_MATCH=4
+# AND requiring ALL 3 timeframes (4h/1h/15m) to independently clear that bar,
+# a full 9-month/50-coin calibration backtest came back with ZERO qualifying
+# setups on ANY coin - the combination was too strict for real market data.
+# Reverted to 1 (a tool agrees as soon as ANY one of its own sub-concepts
+# fires) so MIN_TOOLS_MATCH=4 and the 3-timeframe rule are the only strict
+# filters left - same as before MIN_SUBCONCEPTS_PER_TOOL was introduced.
+
+STRONG_SUBCONCEPTS_PER_TOOL = 2  # FIX (user request): a SECOND, independent
+# entry path, alongside (not instead of) the normal MIN_TOOLS_MATCH-on-all-
+# 3-timeframes rule above. If ANY ONE of the 3 timeframes (4h/1h/15m) on its
+# OWN has at least STRONG_TOOLS_MATCH tools where each of THOSE tools has at
+# least this many (STRONG_SUBCONCEPTS_PER_TOOL) of its own sub-concepts
+# agreeing - a trade opens right there, without needing the other 2
+# timeframes to also confirm. Meant to catch a single very-strong timeframe
+# setup that the stricter "all 3 timeframes" rule would otherwise block.
+STRONG_TOOLS_MATCH = 3  # how many tools (out of 5) must each independently
+# clear STRONG_SUBCONCEPTS_PER_TOOL, on a single timeframe, for this
+# alternate path to fire.
 MIN_PROFIT_CHANCE = 35.0  # FIX: calibration_table.json (27,042 real backtested
 # setups) shows NO score bucket ever reaches 65% real win-rate — the
 # highest bucket (90-100 raw score) only wins 51.7% of the time. Since
