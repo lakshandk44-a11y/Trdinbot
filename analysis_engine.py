@@ -206,6 +206,35 @@ class AnalysisEngine:
         elif ms_bear >= min_sub and ms_bear > ms_bull:
             results["bearish_tools"] += 1
 
+        # ================================================================
+        # STRONG TOOLS TALLY (user request): a SECOND, independent tally
+        # using a stricter per-tool bar (STRONG_SUBCONCEPTS_PER_TOOL, e.g.
+        # 2+) than the normal bullish_tools/bearish_tools above (which uses
+        # MIN_SUBCONCEPTS_PER_TOOL, e.g. 1+). Reuses the exact same
+        # already-computed per-tool counts (ict_bull, fvg_bull, etc.) - just
+        # a different, stricter threshold applied to them, computing a
+        # completely separate 0-5 count. This does NOT replace or change
+        # bullish_tools/bearish_tools at all - it's used by
+        # _weighted_mtf_decision as an ADDITIONAL, alternate way for a
+        # single very-strong timeframe to justify a trade on its own,
+        # alongside (not instead of) the existing all-3-timeframes rule.
+        # ================================================================
+        strong_min_sub = self.config.get("STRONG_SUBCONCEPTS_PER_TOOL", 2)
+        results["strong_bullish_tools"] = sum([
+            ict_bull >= strong_min_sub and ict_bull > ict_bear,
+            fvg_bull >= strong_min_sub and fvg_bull > fvg_bear,
+            ob_bull >= strong_min_sub and ob_bull > ob_bear,
+            liq_bull >= strong_min_sub and liq_bull > liq_bear,
+            ms_bull >= strong_min_sub and ms_bull > ms_bear,
+        ])
+        results["strong_bearish_tools"] = sum([
+            ict_bear >= strong_min_sub and ict_bear > ict_bull,
+            fvg_bear >= strong_min_sub and fvg_bear > fvg_bull,
+            ob_bear >= strong_min_sub and ob_bear > ob_bull,
+            liq_bear >= strong_min_sub and liq_bear > liq_bull,
+            ms_bear >= strong_min_sub and ms_bear > ms_bull,
+        ])
+
         # Tools agreeing (maximum between bullish/bearish)
         results["tools_agreeing"] = max(results["bullish_tools"], results["bearish_tools"])
         
@@ -2064,7 +2093,29 @@ class AnalysisEngine:
         min_bearish_across_tf = min(mtf_results.get(tf, {}).get("bearish_tools", 0) for tf in tf_names)
         all_tf_bullish_ok = min_bullish_across_tf >= min_tools
         all_tf_bearish_ok = min_bearish_across_tf >= min_tools
-        
+
+        # ================================================================
+        # PATH A (user request): a SECOND, independent way to justify a
+        # trade, ALONGSIDE the "all 3 timeframes independently qualify"
+        # rule below (Path B - completely unchanged). If ANY ONE of the 3
+        # timeframes on its own has >= STRONG_TOOLS_MATCH tools where each
+        # of those tools has >= STRONG_SUBCONCEPTS_PER_TOOL of its own sub-
+        # concepts agreeing (a single very-strong timeframe), that alone is
+        # enough - the other 2 timeframes don't need to confirm. If both
+        # directions hit this on different timeframes at the same time
+        # (genuinely conflicting signals), that's treated as ambiguous and
+        # Path A is skipped in favor of Path B below, same as always.
+        # ================================================================
+        strong_min_tools = self.config.get("STRONG_TOOLS_MATCH", 4)
+        strong_path_bullish_tf = [
+            tf for tf in tf_names
+            if mtf_results.get(tf, {}).get("strong_bullish_tools", 0) >= strong_min_tools
+        ]
+        strong_path_bearish_tf = [
+            tf for tf in tf_names
+            if mtf_results.get(tf, {}).get("strong_bearish_tools", 0) >= strong_min_tools
+        ]
+
         # Calculate overall profit chance
         avg_profit_chance = np.mean([
             mtf_results[tf].get("profit_chance", 50) 
@@ -2075,13 +2126,24 @@ class AnalysisEngine:
         news_sentiment = self._get_news_sentiment()
         if news_sentiment != 0:
             weighted_signal += news_sentiment * 0.1
-        
-        if all_tf_bullish_ok and weighted_signal >= 0.3:
+
+        entry_path = "none"
+        if strong_path_bullish_tf and not strong_path_bearish_tf:
+            decision = "BUY"
+            overall_agreeing = max(mtf_results.get(tf, {}).get("strong_bullish_tools", 0) for tf in strong_path_bullish_tf)
+            entry_path = "single_tf_strong"
+        elif strong_path_bearish_tf and not strong_path_bullish_tf:
+            decision = "SELL"
+            overall_agreeing = max(mtf_results.get(tf, {}).get("strong_bearish_tools", 0) for tf in strong_path_bearish_tf)
+            entry_path = "single_tf_strong"
+        elif all_tf_bullish_ok and weighted_signal >= 0.3:
             decision = "BUY"
             overall_agreeing = min_bullish_across_tf
+            entry_path = "all_tf_confirmed"
         elif all_tf_bearish_ok and weighted_signal <= -0.3:
             decision = "SELL"
             overall_agreeing = min_bearish_across_tf
+            entry_path = "all_tf_confirmed"
         else:
             decision = "HOLD"
             # Still report the more-relevant of the two so the diagnostic
@@ -2096,7 +2158,8 @@ class AnalysisEngine:
             "total_bearish_tools": total_bearish,
             "confidence": min(abs(weighted_signal), 1.0),
             "profit_chance": avg_profit_chance,
-            "direction": 1 if decision == "BUY" else (-1 if decision == "SELL" else 0)
+            "direction": 1 if decision == "BUY" else (-1 if decision == "SELL" else 0),
+            "entry_path": entry_path,  # "single_tf_strong" or "all_tf_confirmed" or "none" (HOLD)
         }
     
     def describe_agreement(self, results: Dict, direction: int) -> List[Dict]:
