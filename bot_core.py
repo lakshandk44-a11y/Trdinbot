@@ -952,6 +952,7 @@ class HackerAIBot:
                     "min_notional": coin_min_notional,
                     "entry_atr": entry_atr,
                     "tool_breakdown": tool_breakdown,
+                    "entry_path": signal.get("entry_path", "unknown"),
                 },
                 dynamic_tp=dynamic_tp,
                 dynamic_sl=dynamic_sl
