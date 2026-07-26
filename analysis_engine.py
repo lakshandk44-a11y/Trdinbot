@@ -2107,14 +2107,17 @@ class AnalysisEngine:
         # Path A is skipped in favor of Path B below, same as always.
         # ================================================================
         strong_min_tools = self.config.get("STRONG_TOOLS_MATCH", 4)
-        strong_path_bullish_tf = [
-            tf for tf in tf_names
-            if mtf_results.get(tf, {}).get("strong_bullish_tools", 0) >= strong_min_tools
-        ]
-        strong_path_bearish_tf = [
-            tf for tf in tf_names
-            if mtf_results.get(tf, {}).get("strong_bearish_tools", 0) >= strong_min_tools
-        ]
+        strong_path_bullish_tf = []
+        strong_path_bearish_tf = []
+        if self.config.get("ENABLE_SINGLE_TF_STRONG_ENTRY", False):
+            strong_path_bullish_tf = [
+                tf for tf in tf_names
+                if mtf_results.get(tf, {}).get("strong_bullish_tools", 0) >= strong_min_tools
+            ]
+            strong_path_bearish_tf = [
+                tf for tf in tf_names
+                if mtf_results.get(tf, {}).get("strong_bearish_tools", 0) >= strong_min_tools
+            ]
 
         # Calculate overall profit chance
         avg_profit_chance = np.mean([
