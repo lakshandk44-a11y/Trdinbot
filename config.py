@@ -51,7 +51,7 @@ STRONG_SUBCONCEPTS_PER_TOOL = 2  # FIX (user request): a SECOND, independent
 STRONG_TOOLS_MATCH = 3  # how many tools (out of 5) must each independently
 # clear STRONG_SUBCONCEPTS_PER_TOOL, on a single timeframe, for this
 # alternate path to fire.
-MIN_PROFIT_CHANCE = 35.0  # FIX: calibration_table.json (27,042 real backtested
+MIN_PROFIT_CHANCE = 45.0  # FIX: calibration_table.json (27,042 real backtested
 # setups) shows NO score bucket ever reaches 65% real win-rate — the
 # highest bucket (90-100 raw score) only wins 51.7% of the time. Since
 # analysis_engine._get_calibrated_profit_chance() replaces the raw score
