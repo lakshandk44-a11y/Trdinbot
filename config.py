@@ -48,10 +48,20 @@ STRONG_SUBCONCEPTS_PER_TOOL = 2  # FIX (user request): a SECOND, independent
 # agreeing - a trade opens right there, without needing the other 2
 # timeframes to also confirm. Meant to catch a single very-strong timeframe
 # setup that the stricter "all 3 timeframes" rule would otherwise block.
-STRONG_TOOLS_MATCH = 3  # how many tools (out of 5) must each independently
+STRONG_TOOLS_MATCH = 4  # how many tools (out of 5) must each independently
 # clear STRONG_SUBCONCEPTS_PER_TOOL, on a single timeframe, for this
 # alternate path to fire.
-MIN_PROFIT_CHANCE = 45.0  # FIX: calibration_table.json (27,042 real backtested
+
+# ============================================================
+# TELEGRAM REMOTE CONTROL (user request)
+# ============================================================
+TELEGRAM_ADMIN_CHAT_ID = "8804792847"  # ONLY this chat's commands/button-taps
+# are accepted by telegram_control.py - anyone else messaging the bot is
+# silently ignored. Change this if you ever need to control the bot from a
+# different Telegram account/chat.
+SETTINGS_OVERRIDE_FILE = "settings_override.json"  # where Telegram-toggled
+# settings (and pause state) are saved, so they survive a bot/VPS restart.
+MIN_PROFIT_CHANCE = 35.0  # FIX: calibration_table.json (27,042 real backtested
 # setups) shows NO score bucket ever reaches 65% real win-rate — the
 # highest bucket (90-100 raw score) only wins 51.7% of the time. Since
 # analysis_engine._get_calibrated_profit_chance() replaces the raw score
