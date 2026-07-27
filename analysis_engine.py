@@ -107,6 +107,9 @@ class AnalysisEngine:
             bool(ict.get("inverse_fairy_tale_bullish")),
             ict.get("old_level_support") is not None,
             bool(ict.get("wyckoff_breakout_bullish")),
+            bool(ict.get("displacement_pd_bullish")),
+            bool(ict.get("ote_confluence_bullish")),
+            bool(ict.get("volume_displacement_bullish")),
         ])
         ict_bear = sum([
             ict.get("bos_direction") == "bearish",
@@ -118,6 +121,9 @@ class AnalysisEngine:
             bool(ict.get("inverse_fairy_tale_bearish")),
             ict.get("old_level_resistance") is not None,
             bool(ict.get("wyckoff_breakout_bearish")),
+            bool(ict.get("displacement_pd_bearish")),
+            bool(ict.get("ote_confluence_bearish")),
+            bool(ict.get("volume_displacement_bearish")),
         ])
         ict["bullish_subconcepts"], ict["bearish_subconcepts"] = ict_bull, ict_bear
         if ict_bull >= min_sub and ict_bull > ict_bear:
@@ -316,6 +322,18 @@ class AnalysisEngine:
             "unicorn_bearish": False,
             "inverse_fairy_tale_bullish": False,
             "inverse_fairy_tale_bearish": False,
+            # FIX (regression): these 3 concepts already existed and set
+            # result["bullish"]/["bearish"] directly (see below), but had no
+            # own named field, so they were left OUT of the sub-concept
+            # tally in calculate_all_indicators - meaning setups that used
+            # to make Tool 1 "bullish" via ONE of these 3 concepts alone no
+            # longer counted at all, even at MIN_SUBCONCEPTS_PER_TOOL=1.
+            "displacement_pd_bullish": False,
+            "displacement_pd_bearish": False,
+            "ote_confluence_bullish": False,
+            "ote_confluence_bearish": False,
+            "volume_displacement_bullish": False,
+            "volume_displacement_bearish": False,
             "old_highs": [],
             "old_lows": [],
             "old_level_support": None,
@@ -485,17 +503,21 @@ class AnalysisEngine:
         # ---- Directional bias: displacement aligned with PD array location ----
         if is_displacement_candle and close[-1] > open_p[-1] and pd_zone == "discount":
             result["bullish"] = True
+            result["displacement_pd_bullish"] = True
             result["strength"] += 2
         elif is_displacement_candle and close[-1] < open_p[-1] and pd_zone == "premium":
             result["bearish"] = True
+            result["displacement_pd_bearish"] = True
             result["strength"] -= 2
 
         # OTE confluence: buying/selling from the classic retracement zone adds strength
         if ote and pd_zone == "discount" and close[-1] > open_p[-1]:
             result["bullish"] = True
+            result["ote_confluence_bullish"] = True
             result["strength"] += 1
         elif ote and pd_zone == "premium" and close[-1] < open_p[-1]:
             result["bearish"] = True
+            result["ote_confluence_bearish"] = True
             result["strength"] -= 1
 
         # ================================================================
@@ -507,9 +529,11 @@ class AnalysisEngine:
             if avg_vol > 0 and volume[-1] > avg_vol * 1.5 and is_displacement_candle:
                 if close[-1] > open_p[-1]:
                     result["bullish"] = True
+                    result["volume_displacement_bullish"] = True
                     result["strength"] += 2
                 elif close[-1] < open_p[-1]:
                     result["bearish"] = True
+                    result["volume_displacement_bearish"] = True
                     result["strength"] -= 2
 
         # ================================================================
@@ -2196,6 +2220,9 @@ class AnalysisEngine:
             "Old " + ("Low Support" if want_bull else "High Resistance"):
                 ict.get("old_level_support" if want_bull else "old_level_resistance") is not None,
             "Wyckoff Breakout": bool(ict.get("wyckoff_breakout_bullish" if want_bull else "wyckoff_breakout_bearish")),
+            "Displacement+PD": bool(ict.get("displacement_pd_bullish" if want_bull else "displacement_pd_bearish")),
+            "OTE Confluence": bool(ict.get("ote_confluence_bullish" if want_bull else "ote_confluence_bearish")),
+            "Volume Displacement": bool(ict.get("volume_displacement_bullish" if want_bull else "volume_displacement_bearish")),
         }
         ict_hits = [name for name, fired in ict_names.items() if fired]
         min_sub = self.config.get("MIN_SUBCONCEPTS_PER_TOOL", 2)
