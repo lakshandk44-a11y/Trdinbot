@@ -195,16 +195,24 @@ class AnalysisEngine:
             results["bearish_tools"] += 1
 
         # ---- Tool 5: Market Structure ----
+        # FIX (regression): EMA Alignment was added as a 3rd competing
+        # sub-concept alongside trend/structure_broken. The ORIGINAL code
+        # only ever checked trend/structure_broken (trend ALONE was always
+        # enough) - EMA was never part of this vote before. Adding it as an
+        # equal, independently-counted concept meant a trend-only signal
+        # (trend=bullish, no EMA data either way) could get TIED and
+        # CANCELLED by a contradicting ema_bearish, blocking setups that
+        # used to count on trend alone. ema_bullish/ema_bearish are still
+        # tracked on the result dict (informational), just no longer part
+        # of this tally.
         ms = results["market_structure"]
         ms_bull = sum([
             ms.get("trend") == "bullish",
             ms.get("structure_broken") == "bullish",
-            bool(ms.get("ema_bullish")),
         ])
         ms_bear = sum([
             ms.get("trend") == "bearish",
             ms.get("structure_broken") == "bearish",
-            bool(ms.get("ema_bearish")),
         ])
         ms["bullish_subconcepts"], ms["bearish_subconcepts"] = ms_bull, ms_bear
         if ms_bull >= min_sub and ms_bull > ms_bear:
@@ -2266,7 +2274,6 @@ class AnalysisEngine:
         ms_names = {
             "Swing Trend": ms.get("trend") == ("bullish" if want_bull else "bearish"),
             "BOS/CHoCH": ms.get("structure_broken") == ("bullish" if want_bull else "bearish"),
-            "EMA Alignment": bool(ms.get("ema_bullish" if want_bull else "ema_bearish")),
         }
         ms_hits = [name for name, fired in ms_names.items() if fired]
         if len(ms_hits) >= min_sub:
