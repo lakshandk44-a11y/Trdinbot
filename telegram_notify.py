@@ -94,8 +94,14 @@ def format_trade_opened(trade: dict) -> str:
     path_labels = {
         "single_tf_strong": "🔥 Single Strong Timeframe",
         "all_tf_confirmed": "✅ All 3 Timeframes Confirmed",
+        "pattern_match": "🔷 Pattern Match",
     }
     path_line = f"\nEntry Path: {path_labels.get(entry_path, 'Unknown')}" if entry_path in path_labels else ""
+
+    pattern_name = (trade.get("analysis") or {}).get("pattern_name")
+    pattern_confidence = (trade.get("analysis") or {}).get("pattern_confidence")
+    if entry_path == "pattern_match" and pattern_name:
+        path_line += f"\nPattern: {_md_safe(pattern_name)} ({pattern_confidence}% confidence)"
 
     header = (
         f"🟢 *TRADE OPENED*\n"
