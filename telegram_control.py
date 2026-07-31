@@ -49,6 +49,7 @@ TOGGLE_DEFINITIONS = [
     {"code": "TP1",   "config_key": "TP1_REANALYSIS_ENABLED",       "label": "TP1/TP2/TP3 Reanalysis"},
     {"code": "HOURS", "config_key": "TRADING_HOURS_FILTER_ENABLED", "label": "Trading Hours Filter"},
     {"code": "SMT",   "config_key": "SMT_DIVERGENCE_ENABLED",       "label": "SMT Divergence"},
+    {"code": "PATTERN", "config_key": "PATTERN_ENGINE_ENABLED",     "label": "Pattern Engine (Phase 1)"},
 ]
 
 
