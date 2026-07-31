@@ -61,6 +61,26 @@ STRONG_TOOLS_MATCH = 4  # how many tools (out of 5) must each independently
 # alternate path to fire.
 
 # ============================================================
+# PATTERN RECOGNITION ENGINE (user request, Phase 1 - 6 patterns)
+# ============================================================
+PATTERN_ENGINE_ENABLED = False  # SAFETY DEFAULT: off. With this False (or
+# pattern_engine.py deleted entirely), the bot's existing scan/decision/
+# execute path is 100% unaffected - this is a completely separate, opt-in
+# "second opinion" checked ONLY for a candidate that the normal Tool 5 /
+# MIN_TOOLS_MATCH / MIN_PROFIT_CHANCE gate has ALREADY REJECTED (see
+# bot_core._scan_coins_247). It never runs before or instead of that gate,
+# and never blocks/changes a trade the normal gate already approves.
+PATTERN_MIN_CONFIDENCE = 80.0  # a rejected candidate only gets opened via
+# a pattern match if the best-matching classical chart pattern (Double Top/
+# Bottom, Head & Shoulders/Inverse, Bull/Bear Flag) scores at least this
+# confidence (0-100, see pattern_engine.py for exactly how each pattern's
+# score is built). NOTE: tested against pure random-walk data, ~24% of
+# random noise still scores >=80% on at least one of the 6 patterns - this
+# is a known limitation of pure geometric pattern-matching (real human
+# chart-pattern trading has the same "seeing patterns in noise" risk).
+# Raise this (e.g. to 90-95) for stricter/fewer/higher-quality matches.
+
+# ============================================================
 # TELEGRAM REMOTE CONTROL (user request)
 # ============================================================
 TELEGRAM_ADMIN_CHAT_ID = "8804792847"  # ONLY this chat's commands/button-taps
