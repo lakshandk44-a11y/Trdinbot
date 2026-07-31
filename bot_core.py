@@ -33,6 +33,15 @@ try:
 except Exception:
     _TELEGRAM_CONTROL_AVAILABLE = False
 
+# Optional Pattern Recognition Engine (user request, Phase 1) - same fail-
+# safe pattern: if unavailable or PATTERN_ENGINE_ENABLED=False, the bot's
+# normal scan/decision/execute path is 100% unaffected.
+try:
+    import pattern_engine
+    _PATTERN_ENGINE_AVAILABLE = True
+except Exception:
+    _PATTERN_ENGINE_AVAILABLE = False
+
 from config import *
 from analysis_engine import AnalysisEngine
 from trade_manager import TradeManager
@@ -344,6 +353,7 @@ class HackerAIBot:
 
         # State
         self.balance = 0.0
+        self.available_balance = 0.0
         self.account_info = {}
         self.analysis_cache = {}
         self.scan_count = 0
@@ -472,6 +482,18 @@ class HackerAIBot:
             for asset in account.get("assets", []):
                 if asset["asset"] == "USDT":
                     self.balance = float(asset["walletBalance"])
+                    # FIX (root cause of -2019 "Margin is insufficient" on
+                    # EVERY order): walletBalance is TOTAL equity - it does
+                    # NOT subtract margin already locked in currently-open
+                    # positions/orders. New-trade sizing was using
+                    # walletBalance directly (5% of TOTAL equity), so once
+                    # even one position was open, every subsequent order
+                    # tried to use margin that was already spoken for and
+                    # Binance rejected it - regardless of how healthy
+                    # walletBalance still looked. availableBalance is what
+                    # Binance itself reports as actually free to use for a
+                    # new order right now; used for margin sizing below.
+                    self.available_balance = float(asset.get("availableBalance", asset["walletBalance"]))
                     break
 
             self.consecutive_balance_errors = 0
@@ -566,12 +588,25 @@ class HackerAIBot:
                                 f"profit_chance={profit_chance:.1f}%/{min_chance:.1f}% | "
                                 f"{'✅ PASSED' if passed else '❌ rejected'}")
 
-                    if tools_agreeing >= min_tools and profit_chance >= min_chance:
+                    if passed:
                         if self._is_within_trading_hours():
                             self._execute_trade(symbol, decision, final, ohlc_data, analysis)
                         else:
                             logger.info(f"⏱️ {symbol}: {decision} signal qualified but outside "
                                         f"ALLOWED_TRADING_HOURS_UTC - skipping entry.")
+                    else:
+                        # FIX (user request, Phase 1 pattern engine): the
+                        # normal gate rejected this candidate - optionally
+                        # (PATTERN_ENGINE_ENABLED) give it one more, fully
+                        # independent check against classical chart
+                        # patterns before giving up on this coin this scan.
+                        self._try_pattern_engine_entry(symbol, decision, final, ohlc_data, analysis)
+                else:
+                    # decision == "HOLD": Tool 5 found no direction at all
+                    # on this coin. Still worth a pattern-engine check
+                    # (same opt-in gate) since a chart pattern is a fully
+                    # independent signal from the Tool 5 vote.
+                    self._try_pattern_engine_entry(symbol, decision, final, ohlc_data, analysis)
 
             except Exception as e:
                 logger.error(f"Error scanning {symbol}: {e}")
@@ -789,11 +824,86 @@ class HackerAIBot:
 
         return tp_level, sl_level
 
+    def _try_pattern_engine_entry(self, symbol: str, decision: str, final: Dict,
+                                   ohlc_data: Dict, analysis: Dict):
+        """
+        FIX (user request, Phase 1 pattern engine): called ONLY for a
+        candidate the normal Tool 5 / MIN_TOOLS_MATCH / MIN_PROFIT_CHANCE
+        gate has ALREADY REJECTED (see call sites in _scan_coins_247).
+        Checks the coin's 15m candles against the 6 classical chart
+        patterns in pattern_engine.py; if the best match clears
+        PATTERN_MIN_CONFIDENCE, opens the trade through the EXACT SAME
+        _execute_trade path as every other trade (same margin sizing,
+        leverage, order placement, trade_manager hookup, monitoring, TP1-2-
+        3 reanalysis, Telegram notifications) - just with that pattern's
+        own measured-move TP/SL instead of the normal Tool-5-based levels.
+
+        No-ops immediately (zero overhead) if PATTERN_ENGINE_ENABLED is
+        False (the default) or the module isn't importable.
+        """
+        if not _PATTERN_ENGINE_AVAILABLE or not self.config.get("PATTERN_ENGINE_ENABLED", False):
+            return
+
+        lower_tf = ohlc_data.get("lower")
+        if lower_tf is None or len(lower_tf) < 30:
+            return
+
+        min_confidence = self.config.get("PATTERN_MIN_CONFIDENCE", 80.0)
+        try:
+            match = pattern_engine.detect_best_pattern(lower_tf, min_confidence=min_confidence)
+        except Exception as e:
+            logger.debug(f"pattern_engine: detection failed for {symbol}: {e}")
+            return
+
+        if not match:
+            return
+
+        pattern_decision = match["direction"]  # "BUY" or "SELL", independent of the Tool 5 decision above
+        current_price = float(lower_tf["close"].iloc[-1])
+
+        logger.info(f"🔷 {symbol}: PATTERN MATCH — {match['pattern']} ({match['confidence']}% confidence) "
+                    f"→ {pattern_decision} | target={match['target']:.8f} invalidation={match['invalidation']:.8f}")
+
+        # Build a signal dict compatible with what _execute_trade expects,
+        # tagged so downstream code (Telegram breakdown, entry_path) knows
+        # this came from the pattern engine, not the normal Tool 5 vote.
+        pattern_signal = {
+            "direction": 1 if pattern_decision == "BUY" else -1,
+            "tools_agreeing": 0,
+            "profit_chance": match["confidence"],
+            "entry_path": "pattern_match",
+        }
+        pattern_override = {
+            "tp": match["target"],
+            "sl": match["invalidation"],
+            "pattern": match["pattern"],
+            "confidence": match["confidence"],
+        }
+
+        if not self._is_within_trading_hours():
+            logger.info(f"⏱️ {symbol}: pattern match qualified but outside "
+                        f"ALLOWED_TRADING_HOURS_UTC - skipping entry.")
+            return
+
+        self._execute_trade(symbol, pattern_decision, pattern_signal, ohlc_data,
+                             analysis=None, pattern_override=pattern_override)
+
     def _execute_trade(self, symbol: str, decision: str, signal: Dict, ohlc_data: Dict,
-                        analysis: Optional[Dict] = None):
+                        analysis: Optional[Dict] = None, pattern_override: Optional[Dict] = None):
         """
         Execute trade on Binance Futures
         Auto coin min notional, max leverage, and balance check
+
+        pattern_override (user request): when provided (a dict with
+        "tp"/"sl"/"pattern"/"confidence" from pattern_engine.detect_best_
+        pattern), this trade's TP/SL come from that classical chart
+        pattern's own measured-move levels instead of the normal Tool 5 OB/
+        FVG/Liquidity level picker - used ONLY for the pattern-engine
+        fallback path (see _try_pattern_engine_entry), which itself is only
+        ever reached for a candidate the normal gate already rejected.
+        Every other part of trade execution below (margin sizing, leverage,
+        order placement, trade_manager hookup) is IDENTICAL either way -
+        only where TP/SL come from differs.
         """
         direction = signal.get("direction", 0)
         if direction == 0:
@@ -818,11 +928,18 @@ class HackerAIBot:
             logger.debug(f"Exchange info fetch error for {symbol}: {e}")
 
         # Calculate margin (exactly 5% of balance)
+        # FIX (root cause of -2019 "Margin is insufficient" on every trade):
+        # use available_balance (free margin right now, after subtracting
+        # what's already locked in open positions), NOT self.balance (total
+        # wallet equity, which stays the same regardless of how much margin
+        # other open trades are using). Sizing off total equity meant every
+        # new order could try to use margin that was already spoken for.
         balance_pct = self.config.get("BALANCE_PERCENTAGE", 5) / 100.0
-        margin = self.balance * balance_pct
+        margin = self.available_balance * balance_pct
 
         if margin < 0.001:
-            logger.warning(f"⚠️ Margin too small: ${margin:.4f}. Cannot trade {symbol}")
+            logger.warning(f"⚠️ Margin too small: ${margin:.4f} (available balance: "
+                            f"${self.available_balance:.2f}). Cannot trade {symbol}")
             return
 
         # Calculate required leverage to meet minimum notional
@@ -842,10 +959,20 @@ class HackerAIBot:
                         f"${coin_min_notional:.2f} min. Skipping.")
             return
 
-        # Calculate optimal leverage
-        optimal_leverage = coin_min_notional / margin
-        optimal_leverage = int(optimal_leverage) + (1 if optimal_leverage % 1 > 0 else 0)
-        trade_leverage = min(optimal_leverage, effective_max_lev)
+        # Calculate leverage to use
+        # FIX (real bug: every trade silently traded at 1x): this used to
+        # compute optimal_leverage as the BARE MINIMUM leverage needed to
+        # reach coin_min_notional (coin_min_notional/margin, rounded up),
+        # then take min(optimal_leverage, effective_max_lev). Since margin
+        # is virtually always >> coin_min_notional for any funded account,
+        # that bare minimum came out to 1x almost every time - so
+        # trade_leverage was ALWAYS ~1x regardless of MAX_LEVERAGE (5x/10x/
+        # 25x, whatever was configured), silently wasting the leverage
+        # setting on every trade. We already verified above (max_position =
+        # margin * effective_max_lev >= coin_min_notional) that trading at
+        # effective_max_lev is safe/sufficient, so use it directly - no
+        # need to first compute some smaller "just barely enough" value.
+        trade_leverage = effective_max_lev
 
         # Volatility safety
         volatility = self._calculate_volatility(ohlc_data)
@@ -884,7 +1011,10 @@ class HackerAIBot:
         # usable level for this trade.
         sl_percent = self.config.get("STOP_LOSS_PERCENT", 1.0) / 100.0
         dynamic_tp, dynamic_sl = (None, None)
-        if analysis:
+        if pattern_override:
+            dynamic_tp = pattern_override.get("tp")
+            dynamic_sl = pattern_override.get("sl")
+        elif analysis:
             dynamic_tp, dynamic_sl = self._get_analysis_based_tp_sl(
                 symbol, decision, current_price, analysis
             )
@@ -986,7 +1116,9 @@ class HackerAIBot:
                     "min_notional": coin_min_notional,
                     "entry_atr": entry_atr,
                     "tool_breakdown": tool_breakdown,
-                    "entry_path": signal.get("entry_path", "unknown"),
+                    "entry_path": "pattern_match" if pattern_override else signal.get("entry_path", "unknown"),
+                    "pattern_name": pattern_override.get("pattern") if pattern_override else None,
+                    "pattern_confidence": pattern_override.get("confidence") if pattern_override else None,
                 },
                 dynamic_tp=dynamic_tp,
                 dynamic_sl=dynamic_sl
