@@ -79,6 +79,13 @@ PATTERN_MIN_CONFIDENCE = 80.0  # a rejected candidate only gets opened via
 # is a known limitation of pure geometric pattern-matching (real human
 # chart-pattern trading has the same "seeing patterns in noise" risk).
 # Raise this (e.g. to 90-95) for stricter/fewer/higher-quality matches.
+PATTERN_COOLDOWN_MINUTES = 240  # FIX (user request, re-entry loop): after
+# a pattern-engine trade closes (win OR loss) on a symbol, no new pattern-
+# engine trade can open on that SAME symbol for this many minutes. Without
+# this, the exact same pattern (same swing points, barely-changed price
+# structure) could re-trigger a new trade on the very next scan (30s later)
+# right after a losing close, repeatedly re-losing on the same setup. Does
+# NOT affect normal Tool-5 trades on the same symbol at all.
 
 # ============================================================
 # TELEGRAM REMOTE CONTROL (user request)
@@ -209,7 +216,7 @@ STOP_LOSS_PERCENT = 3.0        # 3% stop loss (also the clamp-range base for ana
 TRAILING_STOP_ACTIVATE = 0.5   # Activate trailing at 0.5% profit
 TRAILING_STOP_DISTANCE = 0.3   # Fallback only: used if a trade's entry ATR wasn't captured
 ATR_TRAILING_MULTIPLIER = 2.0  # Trailing distance = entry ATR(14) x this - adapts to each coin's own volatility instead of one fixed % for all coins
-MAX_OPEN_TRADES = 4           # Maximum concurrent trades
+MAX_OPEN_TRADES = 5           # Maximum concurrent trades
 
 # FIX (TP1 -> TP2 continuation): the moment a trade's first take-profit
 # (TP1) is hit, instead of closing immediately, the bot re-analyzes that
