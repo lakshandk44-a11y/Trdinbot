@@ -209,7 +209,7 @@ STOP_LOSS_PERCENT = 3.0        # 3% stop loss (also the clamp-range base for ana
 TRAILING_STOP_ACTIVATE = 0.5   # Activate trailing at 0.5% profit
 TRAILING_STOP_DISTANCE = 0.3   # Fallback only: used if a trade's entry ATR wasn't captured
 ATR_TRAILING_MULTIPLIER = 2.0  # Trailing distance = entry ATR(14) x this - adapts to each coin's own volatility instead of one fixed % for all coins
-MAX_OPEN_TRADES = 15           # Maximum concurrent trades
+MAX_OPEN_TRADES = 4           # Maximum concurrent trades
 
 # FIX (TP1 -> TP2 continuation): the moment a trade's first take-profit
 # (TP1) is hit, instead of closing immediately, the bot re-analyzes that
