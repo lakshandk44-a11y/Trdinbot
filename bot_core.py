@@ -11,7 +11,7 @@ import hashlib
 import hmac
 import requests
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 import pandas as pd
 import numpy as np
@@ -350,6 +350,15 @@ class HackerAIBot:
         # TradeManager has no analysis engine or OHLC access of its own,
         # so it calls back into bot_core to get a fresh answer.
         self.trade_manager.set_tp1_reanalysis_callback(self._tp1_reanalysis_decision)
+
+        # FIX (user request, pattern-engine re-entry loop): track, per
+        # symbol, the datetime until which a NEW pattern-engine trade is
+        # blocked - set whenever a pattern-based trade closes (see
+        # _on_trade_closed), read in _try_pattern_engine_entry. This alone
+        # does not change anything about the normal Tool 5 path - only
+        # pattern-engine entries are ever gated by this.
+        self.pattern_cooldown_until: Dict[str, datetime] = {}
+        self.trade_manager.set_on_trade_closed_callback(self._on_trade_closed)
 
         # State
         self.balance = 0.0
@@ -824,6 +833,28 @@ class HackerAIBot:
 
         return tp_level, sl_level
 
+    def _on_trade_closed(self, trade: Dict):
+        """
+        FIX (user request, pattern-engine re-entry loop): fired after ANY
+        trade closes. If it was a pattern-engine trade (entry_path ==
+        "pattern_match"), starts a cooldown for that symbol so a losing (or
+        winning) pattern trade can't immediately re-trigger the same
+        pattern again on the very next scan - this was the main mechanism
+        behind repeated back-to-back losses on the same coin/pattern.
+        Completely inert for normal Tool-5 trades (entry_path anything
+        else) - never touches their behavior.
+        """
+        entry_path = (trade.get("analysis") or {}).get("entry_path")
+        if entry_path != "pattern_match":
+            return
+        symbol = trade.get("symbol")
+        if not symbol:
+            return
+        cooldown_minutes = self.config.get("PATTERN_COOLDOWN_MINUTES", 240)
+        self.pattern_cooldown_until[symbol] = datetime.now() + timedelta(minutes=cooldown_minutes)
+        logger.info(f"🔷 {symbol}: pattern-trade closed ({trade.get('close_reason')}) - "
+                    f"pattern-engine entries on this symbol paused for {cooldown_minutes} min.")
+
     def _try_pattern_engine_entry(self, symbol: str, decision: str, final: Dict,
                                    ohlc_data: Dict, analysis: Dict):
         """
@@ -844,6 +875,13 @@ class HackerAIBot:
         if not _PATTERN_ENGINE_AVAILABLE or not self.config.get("PATTERN_ENGINE_ENABLED", False):
             return
 
+        # FIX (user request, re-entry loop): don't open a new pattern trade
+        # on a symbol that just had one close - prevents the same pattern
+        # re-triggering (and re-losing) again right after a loss.
+        cooldown_until = self.pattern_cooldown_until.get(symbol)
+        if cooldown_until and datetime.now() < cooldown_until:
+            return
+
         lower_tf = ohlc_data.get("lower")
         if lower_tf is None or len(lower_tf) < 30:
             return
@@ -860,9 +898,43 @@ class HackerAIBot:
 
         pattern_decision = match["direction"]  # "BUY" or "SELL", independent of the Tool 5 decision above
         current_price = float(lower_tf["close"].iloc[-1])
+        target = match["target"]
+        invalidation = match["invalidation"]
+
+        # FIX (user request, real risk management practice): a pattern is
+        # only tradeable if the CURRENT price still sits between its own
+        # invalidation and target - i.e. the move hasn't already happened
+        # (overextended past target) and the setup hasn't already failed
+        # (past invalidation). Also enforces a minimum reward:risk ratio
+        # (>= 1.2:1) - a pattern whose own measured-move target is closer
+        # than its own invalidation point is a poor bet even if the
+        # direction is right. Both were previously unchecked here, which
+        # let trade_manager's own entry-price sanity check silently swap
+        # in a GENERIC fixed-percent TP/SL that had nothing to do with the
+        # pattern at all whenever this happened - now we just skip the
+        # trade instead of quietly trading a broken/stale setup.
+        if pattern_decision == "BUY":
+            valid_position = invalidation < current_price < target
+            reward = target - current_price
+            risk = current_price - invalidation
+        else:
+            valid_position = target < current_price < invalidation
+            reward = current_price - target
+            risk = invalidation - current_price
+
+        if not valid_position:
+            logger.info(f"🔷 {symbol}: {match['pattern']} matched but price has already moved past "
+                        f"target/invalidation (stale setup) - skipping.")
+            return
+
+        if risk <= 0 or reward / risk < 0.8:
+            logger.info(f"🔷 {symbol}: {match['pattern']} matched but reward:risk "
+                        f"({reward/risk if risk > 0 else 0:.2f}:1) is below the 0.8:1 minimum - skipping.")
+            return
 
         logger.info(f"🔷 {symbol}: PATTERN MATCH — {match['pattern']} ({match['confidence']}% confidence) "
-                    f"→ {pattern_decision} | target={match['target']:.8f} invalidation={match['invalidation']:.8f}")
+                    f"→ {pattern_decision} | target={match['target']:.8f} invalidation={match['invalidation']:.8f} "
+                    f"| reward:risk={reward/risk:.2f}:1")
 
         # Build a signal dict compatible with what _execute_trade expects,
         # tagged so downstream code (Telegram breakdown, entry_path) knows
