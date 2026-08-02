@@ -71,7 +71,18 @@ class TradeManager:
         # callback for a decision and acts on the result. Left as None
         # (feature inert) until bot_core registers it.
         self.tp1_reanalysis_callback = None
-        
+
+        # FIX (user request, pattern-engine re-entry loop): optional
+        # callback, fired with the full trade dict right after ANY trade
+        # closes (any reason, any origin) - used by bot_core to track a
+        # per-symbol cooldown specifically for pattern-engine trades, so a
+        # losing pattern trade can't immediately re-trigger the same
+        # pattern again on the next scan. Left as None (feature inert)
+        # until bot_core registers it - does not change close behavior
+        # itself in any way, purely a read-only notification after the
+        # fact.
+        self.on_trade_closed_callback = None
+
     def set_tp1_reanalysis_callback(self, callback):
         """
         FIX (TP1 -> TP2 continuation): register the function bot_core uses
@@ -82,6 +93,13 @@ class TradeManager:
         to keep the trade open with those new levels instead.
         """
         self.tp1_reanalysis_callback = callback
+
+    def set_on_trade_closed_callback(self, callback):
+        """Register a function called as callback(trade: Dict) right after
+        any trade closes, for any reason. Purely a notification - the
+        callback's return value is ignored and any exception it raises is
+        caught and logged, never affecting the close itself."""
+        self.on_trade_closed_callback = callback
 
     def start_monitoring(self):
         """Start background monitoring (24/7)"""
@@ -966,6 +984,12 @@ class TradeManager:
                 send_telegram(format_trade_closed(trade, current_balance, real_pnl_usdt))
             except Exception as e:
                 logger.warning(f"Telegram notify (close) failed: {e}")
+
+        if self.on_trade_closed_callback:
+            try:
+                self.on_trade_closed_callback(trade)
+            except Exception as e:
+                logger.warning(f"on_trade_closed_callback failed for {symbol}: {e}")
 
         self._save_state()
     
