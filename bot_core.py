@@ -981,6 +981,27 @@ class HackerAIBot:
         if direction == 0:
             return
 
+        # FIX (CRITICAL, user-reported): MAX_OPEN_TRADES used to only be
+        # checked inside trade_manager.open_new_trade() - which is called
+        # AFTER this function already sets leverage on Binance and places a
+        # REAL market order (self.client.new_order below). That meant every
+        # attempt beyond the cap still executed a real, live position on
+        # the exchange, then got silently abandoned (open_new_trade()
+        # returning None before ever placing its protective SL/TP order) -
+        # a real, untracked, UNPROTECTED position with no local record and
+        # no stop-loss. This is almost certainly the source of the
+        # "TP/SL: --/--" orphaned positions seen on the account, and the
+        # repeated pattern-engine re-attempts on the same symbol (each one
+        # placing ANOTHER real order). Checking the cap here, before any
+        # exchange action, makes this function a true no-op once the cap is
+        # reached - exactly matching what MAX_OPEN_TRADES is supposed to do.
+        max_open = self.config.get("MAX_OPEN_TRADES", 15)
+        current_open = len(self.trade_manager.open_trades)
+        if current_open >= max_open:
+            logger.warning(f"⚠️ Max trades ({current_open}/{max_open}). Skipping {symbol} "
+                            f"BEFORE any exchange action (no leverage change, no order placed).")
+            return
+
         # Get coin-specific exchange info
         coin_min_notional = 10.0
         coin_max_leverage = 20
