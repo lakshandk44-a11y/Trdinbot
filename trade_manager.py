@@ -897,6 +897,44 @@ class TradeManager:
 
         exchange_closed = self._close_position_if_needed(symbol, trade_snapshot)
 
+        if not exchange_closed:
+            # FIX (CRITICAL, user-reported): this used to fall through to
+            # the unconditional "pop(symbol)" below regardless of whether
+            # exchange_closed was True or False - meaning a failed close
+            # attempt (network error, API rejection, etc, even after all 3
+            # retries in _place_exchange_close_order) still permanently
+            # removed the trade from local tracking. Since its protective
+            # SL/TP orders were ALREADY cancelled a few lines above, that
+            # left a REAL, STILL-OPEN position on the exchange with NO
+            # protection and NO bot awareness of it at all - exactly the
+            # kind of orphaned position seen on the account. Now: keep the
+            # trade in open_trades (so the next 5s monitor cycle tries
+            # closing it again) and immediately attempt to re-place its
+            # stop-loss order directly, so it isn't left naked even if the
+            # close itself keeps failing.
+            logger.critical(f"🚨 {symbol}: exchange close FAILED after retries - KEEPING this "
+                             f"trade in local tracking (will retry closing next cycle) instead "
+                             f"of abandoning it, and re-placing its protective stop-loss now.")
+            if self.client:
+                try:
+                    close_side = "SELL" if trade_snapshot["side"] == "BUY" else "BUY"
+                    position_side = trade_snapshot.get("position_side") if self.hedge_mode else None
+                    new_order = self.client.new_stop_order(
+                        symbol=symbol, side=close_side, stop_price=trade_snapshot["stop_loss"],
+                        quantity=trade_snapshot["quantity"], order_type="STOP_MARKET",
+                        positionSide=position_side
+                    )
+                    with self.lock:
+                        if symbol in self.open_trades:
+                            self.open_trades[symbol]["sl_order_id"] = new_order.get("orderId")
+                            self.open_trades[symbol]["_last_exchange_sl"] = trade_snapshot["stop_loss"]
+                    logger.info(f"🛡️ {symbol}: protective stop-loss re-placed after close failure.")
+                except Exception as e:
+                    logger.critical(f"🚨 {symbol}: ALSO failed to re-place protective stop-loss "
+                                     f"({e}). MANUAL INTERVENTION REQUIRED IMMEDIATELY - this "
+                                     f"position may be completely unprotected on the exchange.")
+            return
+
         with self.lock:
             if symbol not in self.open_trades:
                 return
