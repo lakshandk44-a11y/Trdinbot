@@ -194,6 +194,59 @@ class TelegramController:
             f"Settings:\n{toggles_text}"
         )
 
+    def _build_rate_text(self) -> str:
+        """
+        FIX (user request, /rate command): win/loss rate of every trade
+        closed so far, from trade_manager's own trade_history (the same
+        list get_trade_history() reads from). "Win"/"Loss" uses the exact
+        same rule trade_manager already uses at close time (pnl_percent >
+        0, which is the fee-adjusted NET result, not the raw price move -
+        see the "Real win-rate bug" fix in trade_manager._close_trade),
+        so this always agrees with what's logged/Telegram'd at close.
+        """
+        history = []
+        try:
+            history = list(self.bot.trade_manager.trade_history)
+        except Exception:
+            pass
+
+        total = len(history)
+        if total == 0:
+            return "📊 *Trade Rate*\n\nNo closed trades yet."
+
+        wins = sum(1 for t in history if t.get("pnl_percent", 0) > 0)
+        losses = total - wins
+        win_pct = (wins / total) * 100
+        loss_pct = (losses / total) * 100
+
+        return (
+            f"📊 *Trade Rate* (all closed trades so far)\n\n"
+            f"Total Trades: {total}\n"
+            f"🟢 Win: {wins}  ({win_pct:.1f}%)\n"
+            f"🔴 Loss: {losses}  ({loss_pct:.1f}%)"
+        )
+
+    # ------------------------------------------------------------------
+    # Command menu registration (Telegram's native "/" command list)
+    # ------------------------------------------------------------------
+    def _register_bot_commands(self):
+        """
+        FIX (user request): register every slash command with Telegram's
+        setMyCommands API so they all show up in the native "/" command
+        menu next to the message box - nothing to remember/forget.
+        Fire-and-forget like every other Telegram call here (_api_call
+        already catches/logs errors) - harmless if it fails, just falls
+        back to typing commands manually as before.
+        """
+        commands = [
+            {"command": "start", "description": "Show control panel buttons"},
+            {"command": "menu", "description": "Show control panel buttons"},
+            {"command": "status", "description": "Bot status + open trades"},
+            {"command": "rate", "description": "Win/loss rate of closed trades"},
+            {"command": "help", "description": "List all commands"},
+        ]
+        self._api_call("setMyCommands", {"commands": commands})
+
     # ------------------------------------------------------------------
     # Update handling
     # ------------------------------------------------------------------
@@ -239,12 +292,17 @@ class TelegramController:
                 self._send_menu(chat_id)
             elif text == "/status":
                 self._send_menu(chat_id, self._build_status_text())
+            elif text == "/rate":
+                self._api_call("sendMessage", {
+                    "chat_id": chat_id, "text": self._build_rate_text(), "parse_mode": "Markdown",
+                })
             elif text == "/help":
                 self._api_call("sendMessage", {
                     "chat_id": chat_id,
                     "text": ("Commands:\n"
                               "/menu - show control panel buttons\n"
                               "/status - show bot status + open trades\n"
+                              "/rate - win/loss rate of closed trades\n"
                               "/help - this message"),
                 })
 
@@ -267,6 +325,7 @@ class TelegramController:
     def start(self):
         if not self.enabled:
             return
+        self._register_bot_commands()
         self.running = True
         self.thread = threading.Thread(target=self._poll_loop, daemon=True)
         self.thread.start()
