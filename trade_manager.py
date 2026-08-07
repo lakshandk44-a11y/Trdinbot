@@ -703,11 +703,84 @@ class TradeManager:
         self._save_state()
         return True
 
+    def _is_closed_on_exchange(self, symbol: str, trade: Dict) -> bool:
+        """
+        FIX (user request): lightweight, single-symbol check (low API
+        weight) mirroring reconcile_with_exchange()'s own "no longer open"
+        detection - previously that check only ran once at bot startup, so
+        a trade closed manually on Binance mid-session kept occupying a
+        MAX_OPEN_TRADES slot locally until the next restart. This runs the
+        exact same real-position check every monitor cycle instead.
+
+        Returns True only when Binance POSITIVELY confirms the position is
+        flat. Any lookup failure or ambiguous result returns False (assume
+        still open, change nothing) - a transient network/API error must
+        never cause a real, still-open trade to be dropped by mistake.
+        """
+        try:
+            positions = self.client.position_risk(symbol=symbol)
+        except Exception:
+            return False
+
+        position_side = trade.get("position_side")
+        amt = None
+        for p in positions or []:
+            if self.hedge_mode and position_side and p.get("positionSide") != position_side:
+                continue
+            try:
+                amt = float(p.get("positionAmt", 0))
+            except (TypeError, ValueError):
+                amt = 0.0
+            break
+
+        if amt is None:
+            return False  # couldn't confirm either way - assume still open
+        return abs(amt) < 1e-10
+
+    def _handle_externally_closed_trade(self, trade: Dict):
+        """
+        FIX (user request): same bookkeeping reconcile_with_exchange()
+        already does at startup for a trade closed while the bot was
+        offline - now also applied the MOMENT it's detected mid-session
+        (e.g. a manual close on Binance), instead of only at the next
+        restart. Cancels any still-resting protective orders (harmless
+        no-op if they're already gone/filled since the manual close),
+        moves the trade out of open_trades and into trade_history exactly
+        like reconcile_with_exchange() does, and frees up its
+        MAX_OPEN_TRADES slot immediately. Does not touch or affect any
+        OTHER open trade's SL/TP/trailing/TP1-2-3 logic in any way.
+        """
+        symbol = trade["symbol"]
+        logger.warning(f"♻️ {symbol} was tracked locally but has no open position on "
+                        f"Binance (closed manually/externally while the bot was running). "
+                        f"Removing from local tracking.")
+        self._cancel_protective_orders(symbol, trade)
+
+        with self.lock:
+            if symbol not in self.open_trades:
+                return
+            popped = self.open_trades.pop(symbol)
+            popped["close_time"] = datetime.now()
+            popped["close_price"] = popped.get("current_price", popped.get("entry_price"))
+            popped["close_reason"] = "RECONCILED_CLOSED_EXTERNALLY"
+            popped["status"] = "CLOSED"
+            self.trade_history.append(popped)
+
+        self._save_state()
+
     def _evaluate_trade(self, trade: Dict):
         """Evaluate trade for SL/TP/trailing"""
         if trade["status"] != "OPEN":
             return
-            
+
+        # FIX (user request): if this trade was closed manually/externally
+        # on Binance since the last check, stop here - nothing below this
+        # point should run for a position that no longer exists. Every
+        # other trade's evaluation this cycle is completely unaffected.
+        if self.client and self._is_closed_on_exchange(trade["symbol"], trade):
+            self._handle_externally_closed_trade(trade)
+            return
+
         current_price = trade["current_price"]
         side = trade["side"]
         
