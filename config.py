@@ -70,15 +70,21 @@ PATTERN_ENGINE_ENABLED = False  # SAFETY DEFAULT: off. With this False (or
 # MIN_TOOLS_MATCH / MIN_PROFIT_CHANCE gate has ALREADY REJECTED (see
 # bot_core._scan_coins_247). It never runs before or instead of that gate,
 # and never blocks/changes a trade the normal gate already approves.
-PATTERN_MIN_CONFIDENCE = 80.0  # a rejected candidate only gets opened via
-# a pattern match if the best-matching classical chart pattern (Double Top/
+PATTERN_MIN_CONFIDENCE = 90.0  # RAISED (user request, per explicit
+# instruction) from 80.0 to 90.0, together with a new breakout-volume-spike
+# check added to all 6 detectors in pattern_engine.py (previously every
+# check was price-structure-only; a breakout with no volume pickup vs the
+# pattern's own formation is a classical false-breakout risk that wasn't
+# being scored at all before). a rejected candidate only gets opened via a
+# pattern match if the best-matching classical chart pattern (Double Top/
 # Bottom, Head & Shoulders/Inverse, Bull/Bear Flag) scores at least this
 # confidence (0-100, see pattern_engine.py for exactly how each pattern's
 # score is built). NOTE: tested against pure random-walk data, ~24% of
-# random noise still scores >=80% on at least one of the 6 patterns - this
-# is a known limitation of pure geometric pattern-matching (real human
-# chart-pattern trading has the same "seeing patterns in noise" risk).
-# Raise this (e.g. to 90-95) for stricter/fewer/higher-quality matches.
+# random noise still scored >=80% on at least one of the 6 patterns at the
+# old 80 threshold/old scoring - this is a known limitation of pure
+# geometric pattern-matching (real human chart-pattern trading has the same
+# "seeing patterns in noise" risk); 90 + the volume check should filter
+# meaningfully more of that out, but re-verify against fresh data.
 PATTERN_COOLDOWN_MINUTES = 240  # FIX (user request, re-entry loop): after
 # a pattern-engine trade closes (win OR loss) on a symbol, no new pattern-
 # engine trade can open on that SAME symbol for this many minutes. Without
