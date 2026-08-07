@@ -1432,7 +1432,20 @@ class HackerAIBot:
             extra = trade["entry_price"] * tp_percent
             new_tp = tp1_level + extra if side == "BUY" else tp1_level - extra
 
-        new_sl = tp1_level  # lock in the just-hit TP's profit as the new stop
+        # FIX (TP1->TP2 zero-buffer SL bug): locking the new stop exactly at
+        # the just-hit TP price left zero room before the very next tick
+        # (which is already at/through that same price) - this is why the
+        # trade almost always closed right back out at TP1 instead of ever
+        # reaching TP2/TP3. A small buffer (half the normal ATR trailing
+        # distance, or a small % fallback) gives the position room to
+        # breathe while still locking in the large majority of TP1's profit.
+        entry_atr = trade.get("analysis", {}).get("entry_atr")
+        if entry_atr:
+            sl_buffer = entry_atr * (self.config.get("ATR_TRAILING_MULTIPLIER", 2.0) * 0.5)
+        else:
+            sl_buffer = tp1_level * (self.config.get("TRAILING_STOP_DISTANCE", 0.3) / 100)
+
+        new_sl = tp1_level + sl_buffer if side == "SELL" else tp1_level - sl_buffer
 
         logger.info(f"✅ [{symbol}] Continuation CONFIRMED ({tools_agreeing}/{min_tools} tools) — "
                     f"extending to TP{to_stage}.")
