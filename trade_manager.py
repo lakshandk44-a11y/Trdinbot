@@ -676,11 +676,11 @@ class TradeManager:
         current_price = trade["current_price"]
         if new_sl is None or new_tp is None:
             return False
-        if side == "BUY" and not (new_sl < current_price < new_tp):
+        if side == "BUY" and not (new_sl <= current_price < new_tp):
             logger.warning(f"⚠️ {symbol}: TP1 extension levels failed sanity check "
                             f"(SL {new_sl} / price {current_price} / TP {new_tp}) — closing at TP1.")
             return False
-        if side == "SELL" and not (new_tp < current_price < new_sl):
+        if side == "SELL" and not (new_tp < current_price <= new_sl):
             logger.warning(f"⚠️ {symbol}: TP1 extension levels failed sanity check "
                             f"(TP {new_tp} / price {current_price} / SL {new_sl}) — closing at TP1.")
             return False
