@@ -78,6 +78,45 @@ def _avg_volume_around(volume: Optional[np.ndarray], idx: int, span: int = 2) ->
     return float(np.mean(volume[lo:hi]))
 
 
+def _breakout_volume_score(volume: Optional[np.ndarray], formation_start: int, formation_end: int,
+                            breakout_start: int, max_points: float) -> float:
+    """
+    ADDED (user request, stronger pattern confidence): classical technical-
+    analysis confirmation signal that none of the existing checks captured
+    - every existing volume check here only looks at volume BEHAVIOR DURING
+    the pattern's formation (declining shoulder->head->shoulder, etc), not
+    at the breakout itself. A genuine breakout is normally accompanied by a
+    volume SPIKE relative to the pattern's own formation volume; a
+    breakout/breakdown on below-average volume is a well-known false-
+    breakout risk. Compares average volume on the breakout bar(s) against
+    average volume across the whole pattern formation window.
+
+    Returns max_points at >=1.3x formation volume, scaling down to 0 at
+    <=1.0x (i.e. breakout volume no higher than the pattern's own average -
+    a real weakness, not just "no bonus"). Returns max_points*0.5 (neutral
+    - neither rewarded nor penalized) when volume data isn't available at
+    all, since many exchanges' futures volume feeds are noisy/incomplete
+    and this must never be a hard requirement.
+    """
+    if volume is None:
+        return max_points * 0.5
+    formation_vol = volume[max(0, formation_start):formation_end]
+    breakout_vol = volume[breakout_start:]
+    if len(formation_vol) == 0 or len(breakout_vol) == 0:
+        return max_points * 0.5
+    avg_formation = float(np.mean(formation_vol))
+    avg_breakout = float(np.mean(breakout_vol))
+    if avg_formation <= 0:
+        return max_points * 0.5
+    ratio = avg_breakout / avg_formation
+    if ratio >= 1.3:
+        return max_points
+    elif ratio >= 1.0:
+        return max_points * ((ratio - 1.0) / 0.3)
+    else:
+        return 0.0
+
+
 def _extract_arrays(ohlc: pd.DataFrame):
     high = ohlc["high"].values.astype(float)
     low = ohlc["low"].values.astype(float)
@@ -168,8 +207,9 @@ def detect_double_top(ohlc: pd.DataFrame) -> Optional[Dict]:
     Weighted confidence (out of 100):
       30 - peak similarity (closer = higher score, tapers out past 3%)
       25 - trough retracement depth is meaningful (3-15% ideal)
-      30 - neckline breakdown actually confirmed (hard structural check)
+      20 - neckline breakdown actually confirmed (hard structural check)
       15 - volume lower on 2nd peak than 1st (classical distribution signal)
+      10 - breakout bar(s) show a volume spike vs the pattern's own formation
     """
     high, low, close, volume = _extract_arrays(ohlc)
     if len(close) < 30:
@@ -216,7 +256,7 @@ def detect_double_top(ohlc: pd.DataFrame) -> Optional[Dict]:
         penetration_pct = (trough - after) / trough
         breakdown = bool(np.any(penetration_pct[-2:] >= 0.003)) and penetration_pct[-1] >= 0.0
     if breakdown:
-        score += 30
+        score += 20
 
     vol1 = _avg_volume_around(volume, peak1_idx)
     vol2 = _avg_volume_around(volume, peak2_idx)
@@ -225,6 +265,11 @@ def detect_double_top(ohlc: pd.DataFrame) -> Optional[Dict]:
             score += 15
         else:
             score += 15 * max(0.0, 1 - (vol2 - vol1) / vol1)
+
+    # ADDED (user request, stronger pattern confidence): breakout-volume
+    # confirmation, distinct from the vol1/vol2 "declining into the
+    # pattern" check above - see _breakout_volume_score docstring.
+    score += _breakout_volume_score(volume, peak1_idx, peak2_idx, len(close) - 2, 10)
 
     if score < 30 or not breakdown:  # structural minimum: needs the confirmed breakdown
         return None
@@ -283,7 +328,7 @@ def detect_double_bottom(ohlc: pd.DataFrame) -> Optional[Dict]:
         penetration_pct = (after - peak) / peak
         breakout = bool(np.any(penetration_pct[-2:] >= 0.003)) and penetration_pct[-1] >= 0.0
     if breakout:
-        score += 30
+        score += 20
 
     vol1 = _avg_volume_around(volume, bottom1_idx)
     vol2 = _avg_volume_around(volume, bottom2_idx)
@@ -292,6 +337,11 @@ def detect_double_bottom(ohlc: pd.DataFrame) -> Optional[Dict]:
             score += 15
         else:
             score += 15 * max(0.0, 1 - (vol2 - vol1) / vol1)
+
+    # ADDED (user request, stronger pattern confidence): breakout-volume
+    # confirmation, distinct from the vol1/vol2 "declining into the
+    # pattern" check above - see _breakout_volume_score docstring.
+    score += _breakout_volume_score(volume, bottom1_idx, bottom2_idx, len(close) - 2, 10)
 
     if score < 30 or not breakout:
         return None
@@ -323,8 +373,9 @@ def detect_head_and_shoulders(ohlc: pd.DataFrame) -> Optional[Dict]:
       20 - head clearly higher than both shoulders
       20 - shoulder symmetry (similar height)
       15 - neckline roughly horizontal (troughs at similar level)
-      30 - neckline breakdown confirmed (hard structural check)
+      20 - neckline breakdown confirmed (hard structural check)
       15 - volume declining shoulder->head->shoulder
+      10 - breakout bar(s) show a volume spike vs the pattern's own formation
     """
     high, low, close, volume = _extract_arrays(ohlc)
     if len(close) < 40:
@@ -375,7 +426,7 @@ def detect_head_and_shoulders(ohlc: pd.DataFrame) -> Optional[Dict]:
         penetration_pct = (neckline_level - after) / neckline_level
         breakdown = bool(np.any(penetration_pct[-2:] >= 0.003)) and penetration_pct[-1] >= 0.0
     if breakdown:
-        score += 30
+        score += 20
 
     vol_ls = _avg_volume_around(volume, ls_idx)
     vol_head = _avg_volume_around(volume, head_idx)
@@ -385,6 +436,11 @@ def detect_head_and_shoulders(ohlc: pd.DataFrame) -> Optional[Dict]:
             score += 15
         else:
             score += 5
+
+    # ADDED (user request, stronger pattern confidence): breakout-volume
+    # confirmation, distinct from the shoulder->head->shoulder "declining
+    # volume" check above - see _breakout_volume_score docstring.
+    score += _breakout_volume_score(volume, ls_idx, rs_idx, len(close) - 2, 10)
 
     if score < 40 or not breakdown:
         return None
@@ -451,7 +507,7 @@ def detect_inverse_head_and_shoulders(ohlc: pd.DataFrame) -> Optional[Dict]:
         penetration_pct = (after - neckline_level) / neckline_level
         breakout = bool(np.any(penetration_pct[-2:] >= 0.003)) and penetration_pct[-1] >= 0.0
     if breakout:
-        score += 30
+        score += 20
 
     vol_ls = _avg_volume_around(volume, ls_idx)
     vol_head = _avg_volume_around(volume, head_idx)
@@ -461,6 +517,11 @@ def detect_inverse_head_and_shoulders(ohlc: pd.DataFrame) -> Optional[Dict]:
             score += 15
         else:
             score += 5
+
+    # ADDED (user request, stronger pattern confidence): breakout-volume
+    # confirmation, distinct from the shoulder->head->shoulder "declining
+    # volume" check above - see _breakout_volume_score docstring.
+    score += _breakout_volume_score(volume, ls_idx, rs_idx, len(close) - 2, 10)
 
     if score < 40 or not breakout:
         return None
@@ -491,7 +552,8 @@ def detect_bull_flag(ohlc: pd.DataFrame) -> Optional[Dict]:
       30 - flagpole is a genuine sharp impulse (strong % move over a short window)
       25 - flag consolidation range is tight relative to the flagpole (low volatility)
       15 - flag drifts flat/slightly down (not up - a rising channel isn't a flag)
-      30 - breakout above flag high confirmed
+      20 - breakout above flag high confirmed
+      10 - breakout bar shows a volume spike vs the flag's own (quiet) consolidation
     """
     high, low, close, volume = _extract_arrays(ohlc)
     n = len(close)
@@ -532,7 +594,13 @@ def detect_bull_flag(ohlc: pd.DataFrame) -> Optional[Dict]:
 
     breakout = close[-1] > flag_high  # FIX: clean breakout check against the (now-excluded-breakout-bar) channel high
     if breakout:
-        score += 30
+        score += 20
+
+    # ADDED (user request, stronger pattern confidence): flags previously
+    # had NO volume check at all. Genuine flag breakouts classically fire
+    # on a volume pickup relative to the (typically quiet) flag
+    # consolidation - see _breakout_volume_score docstring.
+    score += _breakout_volume_score(volume, pole_end, n - 1, n - 1, 10)
 
     if score < 40 or pole_move < 0.03 or not breakout:
         return None
@@ -589,7 +657,13 @@ def detect_bear_flag(ohlc: pd.DataFrame) -> Optional[Dict]:
 
     breakout = close[-1] < flag_low  # FIX: clean breakout check against the (now-excluded-breakout-bar) channel low
     if breakout:
-        score += 30
+        score += 20
+
+    # ADDED (user request, stronger pattern confidence): flags previously
+    # had NO volume check at all. Genuine flag breakouts classically fire
+    # on a volume pickup relative to the (typically quiet) flag
+    # consolidation - see _breakout_volume_score docstring.
+    score += _breakout_volume_score(volume, pole_end, n - 1, n - 1, 10)
 
     if score < 40 or pole_move < 0.03 or not breakout:
         return None
