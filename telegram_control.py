@@ -50,6 +50,12 @@ TOGGLE_DEFINITIONS = [
     {"code": "HOURS", "config_key": "TRADING_HOURS_FILTER_ENABLED", "label": "Trading Hours Filter"},
     {"code": "SMT",   "config_key": "SMT_DIVERGENCE_ENABLED",       "label": "SMT Divergence"},
     {"code": "PATTERN", "config_key": "PATTERN_ENGINE_ENABLED",     "label": "Pattern Engine (Phase 1)"},
+    # ADDED (user request): ON = Isolated margin, OFF = Cross margin.
+    # Bot reads this exact config key (bot_core._execute_trade) right
+    # before opening every new trade and sets the symbol's margin mode on
+    # Binance to match, whichever is toggled ON here at that moment.
+    # Nothing else about how/when a trade opens changes either way.
+    {"code": "ISOMGN", "config_key": "USE_ISOLATED_MARGIN",         "label": "Isolated Margin (OFF = Cross)"},
 ]
 
 
