@@ -196,6 +196,12 @@ ANALYSIS_TOOLS = {
 # in the bot is affected (see bot_core._fetch_multi_timeframe).
 # ============================================================
 SMT_DIVERGENCE_ENABLED = True   # fetch a correlated symbol's candles for SMT Divergence
+
+# ADDED (user request): fetches this coin's current funding rate once per
+# scan and folds it into the profit_chance score as a crowded-positioning
+# check (see AnalysisEngine._calculate_profit_chance) - purely additive,
+# same pattern as SMT_DIVERGENCE_ENABLED above. Set False to disable.
+FUNDING_RATE_ENABLED = True
 SMT_CORRELATED_MAP = {}         # optional per-symbol override, e.g. {"SOLUSDT": "ETHUSDT"} - falls back to BTCUSDT (or ETHUSDT when scanning BTCUSDT itself) when a symbol isn't listed
 DAILY_HISTORY_CANDLES = 200     # ~6.5 months of daily candles fetched per symbol for Macro Structure (PDH/PDL/PWH/PWL) and Old Highs/Lows
 OLD_HIGH_LOW_MIN_DAYS = 30      # an "old" swing high/low must be at least this many days back
