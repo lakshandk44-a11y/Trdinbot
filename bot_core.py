@@ -234,6 +234,28 @@ class BinanceFuturesClient:
             "leverage": leverage
         })
 
+    def leverage_bracket(self, symbol: str) -> list:
+        """
+        FIX (real bug found via user's ESPUSDT report): the old code tried
+        to read per-symbol max leverage out of a "leverageBrackets" field
+        on GET /fapi/v1/exchangeInfo - that field does not exist there
+        (confirmed against Binance's docs: leverage bracket data is only
+        ever returned by this separate, signed endpoint,
+        GET /fapi/v1/leverageBracket). That lookup silently always came
+        back empty, so every coin's max leverage was assumed to be the
+        hardcoded default of 20, regardless of the coin's real cap - for
+        a low-cap coin like ESPUSDT (really capped at 1x), this let the
+        bot compute a position sized for far more leverage than Binance
+        would actually grant.
+        """
+        result = self._get("/fapi/v1/leverageBracket", {"symbol": symbol})
+        # Binance returns a single object when queried with a symbol, but
+        # be defensive - a list wrapping the same object has also been
+        # observed on some API versions/wrappers.
+        if isinstance(result, list):
+            return result[0].get("brackets", []) if result else []
+        return result.get("brackets", [])
+
     def change_margin_type(self, symbol: str, margin_type: str) -> dict:
         """
         ADDED (user request, Telegram-toggleable Isolated/Cross): POST
@@ -1025,12 +1047,20 @@ class HackerAIBot:
                     for f in s.get("filters", []):
                         if f["filterType"] == "MIN_NOTIONAL":
                             coin_min_notional = float(f.get("minNotional", f.get("notional", 10.0)))
-                    brackets = s.get("leverageBrackets", [])
-                    if brackets:
-                        coin_max_leverage = int(brackets[0].get("initialLeverage", 20))
                     break
         except Exception as e:
             logger.debug(f"Exchange info fetch error for {symbol}: {e}")
+
+        # FIX (real bug found via user's ESPUSDT report, see
+        # BinanceFuturesClient.leverage_bracket docstring for the root
+        # cause): this now calls the correct, dedicated endpoint instead
+        # of reading a field that never existed in exchangeInfo.
+        try:
+            brackets = self.client.leverage_bracket(symbol)
+            if brackets:
+                coin_max_leverage = int(brackets[0].get("initialLeverage", 20))
+        except Exception as e:
+            logger.debug(f"Leverage bracket fetch error for {symbol}: {e}")
 
         # Calculate margin (exactly 5% of balance)
         # FIX (root cause of -2019 "Margin is insufficient" on every trade):
@@ -1122,11 +1152,39 @@ class HackerAIBot:
                                 f"(-> {desired_margin_type}): {e}")
 
         # Set leverage on Binance
+        # FIX (real bug found via user's ESPUSDT report): even with the
+        # root-cause leverage_bracket fix above, this is kept as a second,
+        # independent safety net - change_leverage()'s own response always
+        # echoes back the leverage Binance ACTUALLY applied (it
+        # self-corrects/clamps to whatever the account's real bracket
+        # allows). Using that CONFIRMED value - instead of blindly
+        # trusting the pre-computed "intended" final_leverage - for every
+        # downstream position-size calculation means the order can never
+        # end up sized for a leverage that isn't really active, no matter
+        # the reason (stale bracket data, a bracket that changed after our
+        # lookup, a hedge-mode quirk, anything). If the call fails
+        # outright (no confirmed value available at all), fall back to 1x
+        # (the safest possible assumption) rather than trusting an
+        # unverified number - this is the same failure mode that produced
+        # ESPUSDT's oversized margin, so silently keeping the old
+        # (unverified) final_leverage here would not actually fix it.
         try:
-            self.client.change_leverage(symbol=symbol, leverage=final_leverage)
+            lev_resp = self.client.change_leverage(symbol=symbol, leverage=final_leverage)
+            confirmed_leverage = int(lev_resp.get("leverage", final_leverage))
+            if confirmed_leverage != final_leverage:
+                logger.warning(f"⚠️ {symbol}: requested {final_leverage}x but Binance confirmed "
+                                f"{confirmed_leverage}x - using the confirmed value for sizing.")
+            final_leverage = confirmed_leverage
             logger.info(f"⚙️ Leverage set: {symbol} = {final_leverage}x")
         except Exception as e:
-            logger.warning(f"Leverage change warning for {symbol}: {e}")
+            logger.warning(f"Leverage change warning for {symbol}: {e} - falling back to 1x "
+                            f"for safety (actual active leverage could not be confirmed).")
+            final_leverage = 1
+
+        # Recompute position value using the CONFIRMED leverage, not the
+        # pre-verification estimate used for the earlier "TRADE POSSIBLE"
+        # log line - this is what actually drives order size below.
+        final_position = margin * final_leverage
 
         # Calculate position size
         # FIX (analysis-based TP/SL): derive the stop/target from the same
