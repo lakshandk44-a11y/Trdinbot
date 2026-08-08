@@ -234,6 +234,18 @@ class BinanceFuturesClient:
             "leverage": leverage
         })
 
+    def change_margin_type(self, symbol: str, margin_type: str) -> dict:
+        """
+        ADDED (user request, Telegram-toggleable Isolated/Cross): POST
+        /fapi/v1/marginType switches a symbol between ISOLATED and CROSSED
+        margin mode. margin_type must be exactly Binance's enum value:
+        "ISOLATED" or "CROSSED".
+        """
+        return self._post("/fapi/v1/marginType", {
+            "symbol": symbol,
+            "marginType": margin_type
+        })
+
     def new_order(self, symbol: str, side: str, type: str, quantity: float,
                   reduceOnly: bool = False, positionSide: str = None) -> dict:
         params = {
@@ -1088,6 +1100,26 @@ class HackerAIBot:
         if lower_tf is None or len(lower_tf) == 0:
             return
         current_price = float(lower_tf["close"].iloc[-1])
+
+        # ADDED (user request, Telegram-toggleable Isolated/Cross): sets
+        # this symbol's margin mode to whatever USE_ISOLATED_MARGIN is
+        # currently toggled to in Telegram, right before every trade open.
+        # Binance returns -4046 ("No need to change margin type") whenever
+        # the symbol is already in the requested mode - completely normal
+        # on every call after the first for that symbol, not a real error.
+        # Any other failure (e.g. Binance refuses to switch while an old
+        # order/position lingers) is logged and swallowed - falls back to
+        # whatever margin mode the symbol is already in rather than
+        # blocking the trade, exactly like the leverage-change try/except
+        # right below already does.
+        desired_margin_type = "ISOLATED" if self.config.get("USE_ISOLATED_MARGIN", False) else "CROSSED"
+        try:
+            self.client.change_margin_type(symbol=symbol, margin_type=desired_margin_type)
+            logger.info(f"⚙️ Margin type set: {symbol} = {desired_margin_type}")
+        except Exception as e:
+            if "-4046" not in str(e):
+                logger.warning(f"Margin type change warning for {symbol} "
+                                f"(-> {desired_margin_type}): {e}")
 
         # Set leverage on Binance
         try:
