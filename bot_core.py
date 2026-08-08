@@ -203,6 +203,16 @@ class BinanceFuturesClient:
             return data
         return data
 
+    def funding_rate(self, symbol: str) -> dict:
+        """
+        ADDED (user request): GET /fapi/v1/premiumIndex - public endpoint
+        (same unsigned pattern as klines/ticker_price above, no signing
+        needed). Returns current mark price and the current/last funding
+        rate for a symbol (lastFundingRate, a fraction e.g. 0.0001 = 0.01%).
+        """
+        resp = self.session.get(f"{self.base_url}/fapi/v1/premiumIndex", params={"symbol": symbol})
+        return resp.json()
+
     def income(self, symbol: str = None, income_type: str = None,
                start_time: int = None, end_time: int = None,
                limit: int = 100) -> list:
@@ -748,6 +758,21 @@ class HackerAIBot:
             logger.debug(f"Daily-candle fetch skipped for {symbol} "
                          f"(macro structure / old highs-lows will no-op this scan): {e}")
 
+        # ---- Funding Rate (ADDED, user request) -------------------------
+        # Same additive, fully isolated pattern as "correlated"/"daily"
+        # above: on any failure, this key is simply absent and the funding-
+        # rate confluence check inside AnalysisEngine._calculate_profit_chance
+        # no-ops (identical to how a missing calibration table or missing
+        # correlated-symbol data already no-op elsewhere) - nothing else
+        # about this scan is affected.
+        if self.config.get("FUNDING_RATE_ENABLED", True):
+            try:
+                premium = self.client.funding_rate(symbol)
+                funding_rate_pct = float(premium.get("lastFundingRate", 0)) * 100
+                result["market_data"] = {"funding_rate_pct": funding_rate_pct}
+            except Exception as e:
+                logger.debug(f"Funding-rate fetch skipped for {symbol}: {e}")
+
         return result
 
     def _get_smt_correlated_symbol(self, symbol: str) -> str:
@@ -803,6 +828,41 @@ class HackerAIBot:
         caller falls back to the existing fixed-percent
         (TAKE_PROFIT_PERCENT/STOP_LOSS_PERCENT) behavior exactly as before
         — that fallback is unchanged.
+
+        ADDED (user request): Volume Profile POC / Value Area edges are now
+        also added to the same candidate pool (same "strongest wins"
+        selection, same "silently contributes nothing if absent" pattern
+        as every other source here) - see the block right after the old
+        highs/lows loop below.
+
+        FIX (user request, 3 quality improvements to this function only -
+        entry logic, tool vote, profit_chance, trading hours are ALL
+        untouched, this function only runs after the trade side is already
+        decided):
+          1) ATR-scaled weighting: the "fixed weight" candidates (Liquidity,
+             PDH/PDL, PWH/PWL, Old Highs/Lows, Volume Profile POC/VA) used
+             to be a flat fraction of entry_price - comparing a coin's own
+             ATR-independent constant against OB/FVG's REAL price-based
+             size was an apples-to-oranges comparison, and never adapted
+             to how much that specific coin actually moves. Now every
+             fixed-weight candidate is scaled by this timeframe's own ATR
+             (already computed by _detect_fvg) instead, preserving the
+             exact same relative hierarchy between candidate types
+             (PWH/PWL > POC > external liquidity > PDH/PDL = Value Area >
+             Old H/L > internal liquidity) but now genuinely volatility-
+             adaptive. If ATR isn't available for some reason, falls back
+             to a basis that reproduces the OLD fixed-price-fraction
+             weights exactly - nothing regresses in that edge case.
+          2) Reward:risk-aware TP selection: SL selection is UNCHANGED
+             (still the pool's single strongest candidate - the protection
+             level is untouched). TP selection now prefers the strongest
+             candidate that ALSO gives >= 1:1 reward:risk against the
+             chosen SL, only falling back to the pool's absolute strongest
+             (the OLD behavior) when no candidate clears that bar. This can
+             only ever upgrade the TP choice - it never rejects/blocks the
+             trade, since the old fallback path is always still there.
+          3) (Same fix as #1 above - ATR-scaling is what makes this
+             volatility-adaptive; no separate code path needed.)
         """
         resistance_candidates = []  # list of (level, strength)
         support_candidates = []
@@ -811,6 +871,15 @@ class HackerAIBot:
             tf = analysis.get(tf_name)
             if not tf:
                 continue
+
+            # FIX #1/#3: ATR-based weighting basis for every fixed-weight
+            # candidate type below. atr_basis mirrors entry_price*0.005
+            # (the OLD internal-liquidity weight) when ATR is unavailable,
+            # so the multipliers below reproduce the exact OLD numbers in
+            # that fallback case - only the normal (ATR available) case
+            # actually changes behavior.
+            atr = tf.get("fvg", {}).get("atr")
+            atr_basis = atr if atr else entry_price * 0.005
 
             ob = tf.get("order_block", {})
             bear_ob = ob.get("bearish_ob")
@@ -830,42 +899,91 @@ class HackerAIBot:
                     support_candidates.append((fvg["high"], fvg_strength))
 
             liq = tf.get("liquidity", {})
-            liq_strength = entry_price * (0.01 if liq.get("external_swept") else 0.005)
+            liq_strength = atr_basis * (2.0 if liq.get("external_swept") else 1.0)
             if liq.get("buyside_liquidity"):
                 resistance_candidates.append((liq["buyside_liquidity"], liq_strength))
             if liq.get("sellside_liquidity"):
                 support_candidates.append((liq["sellside_liquidity"], liq_strength))
 
             # Extended Tool 1 levels (Macro Structure + Old Highs/Lows).
-            # Weighted as fixed fractions of entry_price, same pattern as
-            # the liquidity weighting above, reflecting ICT's own hierarchy:
-            # weekly > daily > old (1-6 month) swing levels.
+            # Same relative hierarchy as before (weekly > daily > old
+            # swing levels), now ATR-scaled instead of price-fraction.
             ict = tf.get("ict_smc", {})
             if ict.get("pdh") is not None:
-                resistance_candidates.append((ict["pdh"], entry_price * 0.008))
+                resistance_candidates.append((ict["pdh"], atr_basis * 1.6))
             if ict.get("pdl") is not None:
-                support_candidates.append((ict["pdl"], entry_price * 0.008))
+                support_candidates.append((ict["pdl"], atr_basis * 1.6))
             if ict.get("pwh") is not None:
-                resistance_candidates.append((ict["pwh"], entry_price * 0.015))
+                resistance_candidates.append((ict["pwh"], atr_basis * 3.0))
             if ict.get("pwl") is not None:
-                support_candidates.append((ict["pwl"], entry_price * 0.015))
+                support_candidates.append((ict["pwl"], atr_basis * 3.0))
             for lvl in ict.get("old_highs", []):
-                resistance_candidates.append((lvl, entry_price * 0.006))
+                resistance_candidates.append((lvl, atr_basis * 1.2))
             for lvl in ict.get("old_lows", []):
-                support_candidates.append((lvl, entry_price * 0.006))
+                support_candidates.append((lvl, atr_basis * 1.2))
+
+            # ADDED (user request): Volume Profile (POC / Value Area) as
+            # additional candidate levels, using the exact same "add to
+            # the pool, let strength decide" pattern as every other source
+            # above - not a new gate, not a new required check. If Volume
+            # Profile didn't compute (insufficient candles) these keys are
+            # just None and silently contribute nothing, exactly like a
+            # missing OB/FVG/liquidity level already does above. Now also
+            # ATR-scaled (fix #1/#3), same as the other fixed-weight
+            # candidates above.
+            vp = tf.get("volume_profile", {})
+            poc = vp.get("poc_price")
+            if poc is not None:
+                weight = atr_basis * 2.4
+                if poc > entry_price:
+                    resistance_candidates.append((poc, weight))
+                elif poc < entry_price:
+                    support_candidates.append((poc, weight))
+            va_high = vp.get("value_area_high")
+            if va_high is not None and va_high > entry_price:
+                resistance_candidates.append((va_high, atr_basis * 1.6))
+            va_low = vp.get("value_area_low")
+            if va_low is not None and va_low < entry_price:
+                support_candidates.append((va_low, atr_basis * 1.6))
 
         if side == "BUY":
             tp_pool = [(lvl, s) for lvl, s in resistance_candidates if lvl > entry_price]
             sl_pool = [(lvl, s) for lvl, s in support_candidates if lvl < entry_price]
-            tp_level = max(tp_pool, key=lambda x: x[1])[0] if tp_pool else None   # strongest resistance above
-            sl_level = max(sl_pool, key=lambda x: x[1])[0] if sl_pool else None   # strongest support below
+            sl_level = max(sl_pool, key=lambda x: x[1])[0] if sl_pool else None   # strongest support below (unchanged)
+            tp_level = self._pick_tp_with_rr(tp_pool, entry_price, sl_level) if tp_pool else None
         else:
             tp_pool = [(lvl, s) for lvl, s in support_candidates if lvl < entry_price]
             sl_pool = [(lvl, s) for lvl, s in resistance_candidates if lvl > entry_price]
-            tp_level = max(tp_pool, key=lambda x: x[1])[0] if tp_pool else None   # strongest support below
-            sl_level = max(sl_pool, key=lambda x: x[1])[0] if sl_pool else None   # strongest resistance above
+            sl_level = max(sl_pool, key=lambda x: x[1])[0] if sl_pool else None   # strongest resistance above (unchanged)
+            tp_level = self._pick_tp_with_rr(tp_pool, entry_price, sl_level) if tp_pool else None
 
         return tp_level, sl_level
+
+    def _pick_tp_with_rr(self, tp_pool: List[Tuple[float, float]], entry_price: float,
+                          sl_level: Optional[float]) -> float:
+        """
+        FIX (user request, quality improvement #2 of 3): prefer the
+        strongest TP candidate that ALSO gives >= 1:1 reward:risk against
+        the already-chosen SL. Falls back to the pool's absolute strongest
+        candidate (the OLD, unchanged behavior) whenever no candidate
+        clears that bar, or when there's no SL to measure against - so
+        this can only ever upgrade the TP choice, it never blocks/rejects
+        the trade (tp_pool is only ever called with a non-empty pool, by
+        the "if tp_pool else None" checks at each call site).
+        """
+        strongest = max(tp_pool, key=lambda x: x[1])[0]
+        if sl_level is None:
+            return strongest
+
+        risk = abs(entry_price - sl_level)
+        if risk <= 0:
+            return strongest
+
+        qualifying = [(lvl, s) for lvl, s in tp_pool if abs(lvl - entry_price) >= risk]
+        if qualifying:
+            return max(qualifying, key=lambda x: x[1])[0]
+
+        return strongest
 
     def _on_trade_closed(self, trade: Dict):
         """
