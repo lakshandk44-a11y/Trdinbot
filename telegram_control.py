@@ -50,6 +50,8 @@ TOGGLE_DEFINITIONS = [
     {"code": "HOURS", "config_key": "TRADING_HOURS_FILTER_ENABLED", "label": "Trading Hours Filter"},
     {"code": "SMT",   "config_key": "SMT_DIVERGENCE_ENABLED",       "label": "SMT Divergence"},
     {"code": "PATTERN", "config_key": "PATTERN_ENGINE_ENABLED",     "label": "Pattern Engine (Phase 1)"},
+    # ADDED (user request): Volume Profile + Funding Rate confluence.
+    {"code": "FUNDING", "config_key": "FUNDING_RATE_ENABLED",       "label": "Funding Rate Confluence"},
     # ADDED (user request): ON = Isolated margin, OFF = Cross margin.
     # Bot reads this exact config key (bot_core._execute_trade) right
     # before opening every new trade and sets the symbol's margin mode on
