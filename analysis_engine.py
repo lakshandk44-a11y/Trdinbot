@@ -33,7 +33,8 @@ class AnalysisEngine:
         
     def calculate_all_indicators(self, ohlc: pd.DataFrame,
                                   correlated_ohlc: Optional[pd.DataFrame] = None,
-                                  daily_ohlc: Optional[pd.DataFrame] = None) -> Dict:
+                                  daily_ohlc: Optional[pd.DataFrame] = None,
+                                  market_data: Optional[Dict] = None) -> Dict:
         """
         Run all 5 analysis tools on a single timeframe.
 
@@ -42,6 +43,15 @@ class AnalysisEngine:
         symbol's candles; Macro Structure / Old Highs-Lows need daily
         candles). If either is not provided, those specific sub-features
         simply don't trigger - nothing else changes, exactly like before.
+
+        market_data (ADDED, user request) is an OPTIONAL dict of live
+        market data (currently: funding_rate_pct) used only by the new
+        Volume Profile / Funding Rate confluence checks inside
+        _calculate_profit_chance. Same pattern as correlated_ohlc/
+        daily_ohlc: if not provided, those specific checks just no-op.
+        Neither this nor Volume Profile touches the 5-tool
+        bullish_tools/bearish_tools vote below in any way - both are
+        purely additive inputs to the separate profit_chance score.
         """
         results = {}
 
@@ -68,6 +78,16 @@ class AnalysisEngine:
         results["order_block"] = ob_result
         results["liquidity"] = liquidity_result
         results["market_structure"] = ms_result
+
+        # ADDED (user request): Volume Profile (VPVR) and the passed-through
+        # live market_data (funding rate). Both are stored as plain extra
+        # result keys, computed/attached here alongside the 5 tools above,
+        # but are NOT tools themselves - see the "TOOLS AGREEMENT" block
+        # right below, which is completely unchanged and has no knowledge
+        # of either of these keys. They are read only inside
+        # _calculate_profit_chance, as additional (non-gating) score inputs.
+        results["volume_profile"] = self._volume_profile_analysis(ohlc)
+        results["market_data"] = market_data or {}
         
         # ================================================================
         # TOOLS AGREEMENT (bullish_tools / bearish_tools, out of 5)
@@ -1784,6 +1804,97 @@ class AnalysisEngine:
 
         return result
 
+    def _volume_profile_analysis(self, ohlc: pd.DataFrame, num_bins: int = 24) -> Dict:
+        """
+        ADDED (user request): Volume Profile (VPVR) - bins the visible
+        price range (of this same timeframe's candles) into `num_bins`
+        buckets and sums traded volume in each, to find the Point of
+        Control (POC - the single highest-volume price level, the
+        strongest support/resistance in the visible range) and the Value
+        Area (the tightest contiguous band of bins holding ~68% of total
+        volume - the "fair value" zone). This is a well-established,
+        independent (volume-based, not price-structure-based) confluence
+        signal that complements the existing 5 price-structure tools
+        without duplicating them.
+
+        Purely a NEW, read-only result key - does not participate in the
+        bullish_tools/bearish_tools vote at all (that block never reads
+        this key). Only consumed by _calculate_profit_chance below as an
+        additional, non-gating score input.
+        """
+        result = {
+            "poc_price": None,
+            "value_area_high": None,
+            "value_area_low": None,
+            "in_value_area": False,
+            "near_poc": False,
+        }
+        if ohlc is None or len(ohlc) < 20 or "volume" not in ohlc.columns:
+            return result
+
+        high = ohlc["high"].values
+        low = ohlc["low"].values
+        close = ohlc["close"].values
+        volume = ohlc["volume"].values
+
+        price_min = float(np.min(low))
+        price_max = float(np.max(high))
+        if not np.isfinite(price_min) or not np.isfinite(price_max) or price_max <= price_min:
+            return result
+
+        bin_edges = np.linspace(price_min, price_max, num_bins + 1)
+        bin_volume = np.zeros(num_bins)
+
+        # Distribute each candle's volume across the bins its high-low
+        # range spans, proportional to how much of the bin the candle's
+        # range overlaps - a standard, simple VPVR approximation.
+        for i in range(len(ohlc)):
+            c_low, c_high, c_vol = low[i], high[i], volume[i]
+            if not np.isfinite(c_low) or not np.isfinite(c_high) or c_high <= c_low or c_vol <= 0:
+                continue
+            for b in range(num_bins):
+                b_lo, b_hi = bin_edges[b], bin_edges[b + 1]
+                overlap = min(c_high, b_hi) - max(c_low, b_lo)
+                if overlap > 0:
+                    bin_volume[b] += c_vol * (overlap / (c_high - c_low))
+
+        total_vol = float(bin_volume.sum())
+        if total_vol <= 0:
+            return result
+
+        poc_idx = int(np.argmax(bin_volume))
+        poc_price = float((bin_edges[poc_idx] + bin_edges[poc_idx + 1]) / 2)
+
+        # Value Area: grow outward from the POC bin until >=68% of total
+        # volume is included (standard VPVR definition), always adding
+        # whichever neighboring bin (above or below the current band) has
+        # more volume next.
+        target = total_vol * 0.68
+        running = bin_volume[poc_idx]
+        lo_i, hi_i = poc_idx, poc_idx
+        while running < target and (lo_i > 0 or hi_i < num_bins - 1):
+            next_lo_vol = bin_volume[lo_i - 1] if lo_i > 0 else -1.0
+            next_hi_vol = bin_volume[hi_i + 1] if hi_i < num_bins - 1 else -1.0
+            if next_hi_vol >= next_lo_vol:
+                hi_i += 1
+                running += bin_volume[hi_i]
+            else:
+                lo_i -= 1
+                running += bin_volume[lo_i]
+
+        va_low = float(bin_edges[lo_i])
+        va_high = float(bin_edges[hi_i + 1])
+        current_price = float(close[-1])
+        bin_width = (price_max - price_min) / num_bins
+
+        result["poc_price"] = poc_price
+        result["value_area_high"] = va_high
+        result["value_area_low"] = va_low
+        result["in_value_area"] = va_low <= current_price <= va_high
+        result["near_poc"] = abs(current_price - poc_price) <= bin_width
+
+        return result
+
     
     def _generate_signal(self, results: Dict) -> int:
         """Generate signal: 1=BUY, -1=SELL, 0=HOLD"""
@@ -1937,6 +2048,51 @@ class AnalysisEngine:
         news_sentiment = self._get_news_sentiment()
         score += news_sentiment * 8
 
+        # ================================================================
+        # ADDED (user request): Volume Profile + Funding Rate confluence.
+        # Both are purely additive/subtractive nudges on this SAME existing
+        # score, exactly like every component above (ICT/SMC, FVG, OB,
+        # Liquidity, Market Structure, news sentiment) - neither one gates
+        # or replaces anything, and neither touches bullish_tools/
+        # bearish_tools/tools_agreeing/total_active_tools (the 5-tool vote)
+        # at all. They only change whether the FINAL profit_chance number
+        # clears the separate, already-existing MIN_PROFIT_CHANCE gate.
+        # ================================================================
+
+        # Volume Profile: current price at/near the Point of Control (the
+        # single highest-volume level in the visible range) is a strong,
+        # independent (volume-based, not price-structure-based) reaction
+        # zone. Inside the Value Area (the ~68%-of-volume "fair value"
+        # band) is a moderate positive. Outside both is a low-volume "air
+        # pocket" - historically thinner, less reliable price action.
+        vp = results.get("volume_profile", {})
+        if vp.get("near_poc"):
+            score += 4
+        elif vp.get("in_value_area"):
+            score += 2
+        elif vp.get("poc_price") is not None:
+            score -= 2
+
+        # Funding Rate: crypto-futures-specific positioning signal,
+        # independent of price structure. An extreme funding rate in the
+        # SAME direction as this timeframe's own tool-vote lean signals
+        # crowded positioning (everyone already long/short) - a classic
+        # contrarian warning that a squeeze/reversal is more likely, so
+        # the setup is penalized. Funding skewed the OTHER way (less
+        # crowded) is a mild positive. Uses this timeframe's own
+        # bullish_tools/bearish_tools as the direction proxy - the same
+        # signal already used a few lines above for the conflicting-tools
+        # penalty, so this is consistent with how this function already
+        # reasons about direction.
+        md = results.get("market_data", {})
+        funding_rate_pct = md.get("funding_rate_pct")
+        if funding_rate_pct is not None:
+            direction = 1 if bullish_tools >= bearish_tools else -1
+            if (direction > 0 and funding_rate_pct > 0.05) or (direction < 0 and funding_rate_pct < -0.05):
+                score -= 4
+            elif (direction > 0 and funding_rate_pct < -0.02) or (direction < 0 and funding_rate_pct > 0.02):
+                score += 2
+
         # Clamp between 0-100
         raw_score = max(0.0, min(100.0, score))
 
@@ -2040,14 +2196,18 @@ class AnalysisEngine:
             SMT-divergence reference symbol's candles on matching timeframes.
           - "daily": df - daily candles used for Macro Structure / Old
             Highs-Lows.
-        Both are purely additive. Callers that only pass "higher"/"medium"/
-        "lower" (e.g. the existing backtest scripts) are completely
-        unaffected - those extra Tool 1 sub-features just don't trigger.
+          - "market_data": {"funding_rate_pct": ...} (ADDED, user request) -
+            live market data, currently just funding rate, passed through
+            unchanged to all 3 timeframes (it isn't timeframe-specific).
+        All three are purely additive. Callers that only pass "higher"/
+        "medium"/"lower" (e.g. the existing backtest scripts) are
+        completely unaffected - those extra sub-features just don't trigger.
         """
         results = {}
 
         correlated_data = ohlc_data.get("correlated") if isinstance(ohlc_data, dict) else None
         daily_ohlc = ohlc_data.get("daily") if isinstance(ohlc_data, dict) else None
+        market_data = ohlc_data.get("market_data") if isinstance(ohlc_data, dict) else None
 
         for tf_name in ["higher", "medium", "lower"]:
             if tf_name in ohlc_data and ohlc_data[tf_name] is not None:
@@ -2057,7 +2217,7 @@ class AnalysisEngine:
                     if isinstance(correlated_data, dict):
                         corr_df = correlated_data.get(tf_name)
                     results[tf_name] = self.calculate_all_indicators(
-                        df, correlated_ohlc=corr_df, daily_ohlc=daily_ohlc
+                        df, correlated_ohlc=corr_df, daily_ohlc=daily_ohlc, market_data=market_data
                     )
                 else:
                     results[tf_name] = {"signal": 0, "confidence": 0, "profit_chance": 0}
@@ -2320,4 +2480,4 @@ class AnalysisEngine:
         except Exception as e:
             logger.error(f"News API error: {e}")
         
-        return 0.0
+        return 0.0 
