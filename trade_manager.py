@@ -773,14 +773,6 @@ class TradeManager:
         if trade["status"] != "OPEN":
             return
 
-        # FIX (user request): if this trade was closed manually/externally
-        # on Binance since the last check, stop here - nothing below this
-        # point should run for a position that no longer exists. Every
-        # other trade's evaluation this cycle is completely unaffected.
-        if self.client and self._is_closed_on_exchange(trade["symbol"], trade):
-            self._handle_externally_closed_trade(trade)
-            return
-
         current_price = trade["current_price"]
         side = trade["side"]
         
@@ -806,6 +798,25 @@ class TradeManager:
         elif side == "SELL" and current_price >= trade["stop_loss"]:
             logger.info(f"🛑 SL HIT: {trade['symbol']} @ {current_price:.8f} (PnL: {trade['pnl_percent']:.2f}%)")
             self._close_trade(trade["symbol"], "STOP_LOSS")
+            return
+
+        # FIX (regression found by user - missing "closed" Telegram
+        # message): this external-close check used to run FIRST, before
+        # the software TP/SL comparison above. That created a race: the
+        # instant our OWN resting SL/TP order filled on Binance normally,
+        # the exchange position went flat immediately, and this check -
+        # running first, every cycle - kept winning that race and
+        # misclassifying completely normal bot-driven closes as
+        # "externally closed", which skips _close_trade() entirely (no
+        # Telegram "CLOSED" message, since that message is only sent from
+        # _close_trade()). Now it only runs as a fallback AFTER the normal
+        # TP/SL checks above already had their chance to explain why the
+        # trade is flat - so a real SL/TP fill is always caught by the
+        # normal path first (Telegram sent as always), and this only
+        # fires for a genuine manual/external close (flat on Binance
+        # despite price never having reached either level).
+        if self.client and self._is_closed_on_exchange(trade["symbol"], trade):
+            self._handle_externally_closed_trade(trade)
             return
         
         # REDESIGN (trailing stop, per explicit request): reverted the
