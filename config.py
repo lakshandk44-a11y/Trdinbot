@@ -238,6 +238,15 @@ MAX_OPEN_TRADES = 5           # Maximum concurrent trades
 # (close immediately on any TP hit).
 TP1_REANALYSIS_ENABLED = True
 
+# ADDED (user request): Telegram-toggleable Isolated/Cross margin mode.
+# True = ISOLATED, False = CROSSED. Read fresh from this same config dict
+# right before every trade opens (bot_core._execute_trade), so flipping
+# the "Isolated Margin" button in Telegram takes effect on the very next
+# trade - no restart needed. Default False (Cross) matches whatever the
+# account's existing/previous margin mode already was, so a bot that
+# never touches this toggle behaves exactly as before.
+USE_ISOLATED_MARGIN = False
+
 # These three previously had NO entry in config.py at all - they only
 # worked because the code's internal .get(key, default) fallback happened
 # to match a sane value. Making them explicit here means they're visible
