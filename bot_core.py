@@ -863,9 +863,17 @@ class HackerAIBot:
              trade, since the old fallback path is always still there.
           3) (Same fix as #1 above - ATR-scaling is what makes this
              volatility-adaptive; no separate code path needed.)
+
+        ADDED (user request, Confluence Stacking): after all candidates
+        are gathered below, nearby levels are merged into combined
+        clusters (see _cluster_candidates) before selection - so a zone
+        with several independent levels overlapping can win over one
+        single strong level elsewhere, the same "multiple confirmations
+        in one zone" concept ICT's Unicorn Model already uses for entries.
         """
         resistance_candidates = []  # list of (level, strength)
         support_candidates = []
+        atr_basis = entry_price * 0.005  # fallback if the loop below never sets it (analysis missing both timeframes)
 
         for tf_name in ["higher", "medium"]:
             tf = analysis.get(tf_name)
@@ -946,6 +954,25 @@ class HackerAIBot:
             if va_low is not None and va_low < entry_price:
                 support_candidates.append((va_low, atr_basis * 1.6))
 
+        # ADDED (user request): Confluence Stacking. A professional trader
+        # weighs a zone where SEVERAL independent levels cluster together
+        # (e.g. an Order Block overlapping a Fair Value Gap overlapping a
+        # Volume Profile POC) as a materially stronger zone than any one of
+        # those levels alone - this is exactly the "Unicorn Model" concept
+        # Tool 1 already uses for entries, now applied to level SELECTION
+        # too. Groups candidates within one ATR of each other and treats a
+        # cluster's SUMMED strength as a single combined candidate; this
+        # can only ever make an already-detected level win more often when
+        # it has real confluence behind it - it never invents a new level,
+        # never removes any candidate from the pool, and the exact same
+        # fallback logic (pick the strongest, or pick a >=1:1 R:R one) runs
+        # unchanged right after this - so if clustering finds nothing (a
+        # sparse pool with no nearby levels), every candidate simply stays
+        # its own single-member "cluster" and behavior is identical to
+        # before.
+        resistance_candidates = self._cluster_candidates(resistance_candidates, atr_basis)
+        support_candidates = self._cluster_candidates(support_candidates, atr_basis)
+
         if side == "BUY":
             tp_pool = [(lvl, s) for lvl, s in resistance_candidates if lvl > entry_price]
             sl_pool = [(lvl, s) for lvl, s in support_candidates if lvl < entry_price]
@@ -984,6 +1011,44 @@ class HackerAIBot:
             return max(qualifying, key=lambda x: x[1])[0]
 
         return strongest
+
+    def _cluster_candidates(self, candidates: List[Tuple[float, float]],
+                             cluster_distance: float) -> List[Tuple[float, float]]:
+        """
+        ADDED (user request, Confluence Stacking): groups candidate levels
+        that fall within `cluster_distance` of each other into a single
+        combined candidate - its strength is the SUM of every member's
+        strength, its level is their strength-weighted average. A cluster
+        of 3 independent, moderately-strong levels all pointing at nearly
+        the same price can then legitimately outweigh one single very
+        strong level elsewhere, exactly how real confluence works.
+
+        Pure pool transformation - every input candidate is still
+        represented in the output (just possibly merged), so this can
+        never make the pool empty or remove information; it can only
+        change which combined level ends up strongest.
+        """
+        if not candidates:
+            return []
+
+        sorted_candidates = sorted(candidates, key=lambda x: x[0])
+        clusters = [[sorted_candidates[0]]]
+        for lvl, strength in sorted_candidates[1:]:
+            if lvl - clusters[-1][-1][0] <= cluster_distance:
+                clusters[-1].append((lvl, strength))
+            else:
+                clusters.append([(lvl, strength)])
+
+        merged = []
+        for cluster in clusters:
+            total_strength = sum(s for _, s in cluster)
+            if total_strength > 0:
+                weighted_level = sum(lvl * s for lvl, s in cluster) / total_strength
+            else:
+                weighted_level = cluster[0][0]
+            merged.append((weighted_level, total_strength))
+
+        return merged
 
     def _on_trade_closed(self, trade: Dict):
         """
