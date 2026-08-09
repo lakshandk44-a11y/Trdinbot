@@ -88,6 +88,11 @@ class AnalysisEngine:
         # _calculate_profit_chance, as additional (non-gating) score inputs.
         results["volume_profile"] = self._volume_profile_analysis(ohlc)
         results["market_data"] = market_data or {}
+        # ADDED (user request): Market Regime Detection (ADX). Same pattern
+        # as volume_profile immediately above - a plain extra result key,
+        # NOT a tool, no involvement in the bullish_tools/bearish_tools
+        # vote block right below. Read only inside _calculate_profit_chance.
+        results["market_regime"] = self._market_regime_analysis(ohlc)
         
         # ================================================================
         # TOOLS AGREEMENT (bullish_tools / bearish_tools, out of 5)
@@ -1659,6 +1664,88 @@ class AnalysisEngine:
 
         return result
 
+    def _market_regime_analysis(self, ohlc: pd.DataFrame, period: int = 14) -> Dict:
+        """
+        ADDED (user request): Market Regime Detection via ADX (Average
+        Directional Index, Wilder's standard method) - classifies this
+        timeframe's own recent price action as "trending" or "ranging".
+        This is genuinely NEW information none of the 5 existing tools
+        capture: they detect STRUCTURE (order blocks, FVGs, liquidity,
+        BOS/CHoCH) but never whether the broader environment actually
+        favors a breakout/trend-following read (what ICT/SMC concepts are
+        built for) versus a choppy, mean-reverting one (where those same
+        signals are classically less reliable) - exactly what a
+        professional trader reads the regime for before trusting a
+        breakout signal.
+
+        Purely a NEW, read-only result key - does not participate in the
+        bullish_tools/bearish_tools vote at all (that block never reads
+        this key, same as volume_profile above). Only consumed by
+        _calculate_profit_chance below as an additional, non-gating score
+        input - exactly the same pattern as Volume Profile/Funding Rate,
+        so it can only ever nudge the existing score, never block/reject
+        a trade that already passed the 5-tool vote.
+        """
+        result = {"adx": None, "regime": "unknown"}
+        if ohlc is None or len(ohlc) < period * 2 + 1:
+            return result
+
+        high = ohlc["high"].values
+        low = ohlc["low"].values
+        close = ohlc["close"].values
+        n = len(ohlc)
+
+        plus_dm = np.zeros(n)
+        minus_dm = np.zeros(n)
+        tr = np.zeros(n)
+        for i in range(1, n):
+            up_move = high[i] - high[i - 1]
+            down_move = low[i - 1] - low[i]
+            plus_dm[i] = up_move if (up_move > down_move and up_move > 0) else 0.0
+            minus_dm[i] = down_move if (down_move > up_move and down_move > 0) else 0.0
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i - 1]), abs(low[i] - close[i - 1]))
+
+        # Wilder's smoothing (same technique as a standard ATR/RSI smooth).
+        def wilder_smooth(arr, period):
+            smoothed = np.zeros(len(arr))
+            smoothed[period] = arr[1:period + 1].sum()
+            for i in range(period + 1, len(arr)):
+                smoothed[i] = smoothed[i - 1] - (smoothed[i - 1] / period) + arr[i]
+            return smoothed
+
+        if n <= period + 1:
+            return result
+
+        tr_smooth = wilder_smooth(tr, period)
+        plus_dm_smooth = wilder_smooth(plus_dm, period)
+        minus_dm_smooth = wilder_smooth(minus_dm, period)
+
+        with np.errstate(divide="ignore", invalid="ignore"):
+            plus_di = np.where(tr_smooth != 0, 100 * plus_dm_smooth / tr_smooth, 0.0)
+            minus_di = np.where(tr_smooth != 0, 100 * minus_dm_smooth / tr_smooth, 0.0)
+            di_sum = plus_di + minus_di
+            dx = np.where(di_sum != 0, 100 * np.abs(plus_di - minus_di) / di_sum, 0.0)
+
+        # ADX = Wilder-smoothed average of DX over the last `period` bars
+        # with valid data (starting right after the initial DI/TR warm-up).
+        dx_valid = dx[period:]
+        if len(dx_valid) < period:
+            return result
+        adx = float(np.mean(dx_valid[-period:]))
+
+        if not np.isfinite(adx):
+            return result
+
+        result["adx"] = round(adx, 1)
+        if adx >= 25:
+            result["regime"] = "trending"
+        elif adx < 20:
+            result["regime"] = "ranging"
+        else:
+            result["regime"] = "transitional"
+
+        return result
+
     def _market_structure(self, ohlc: pd.DataFrame) -> Dict:
         """
         Tool 5: Market Structure Analysis
@@ -2093,6 +2180,20 @@ class AnalysisEngine:
             elif (direction > 0 and funding_rate_pct < -0.02) or (direction < 0 and funding_rate_pct > 0.02):
                 score += 2
 
+        # Market Regime (ADX) - ADDED (user request): a professional
+        # trader reads the broader regime (trending vs choppy/ranging)
+        # before trusting a breakout-style signal - ICT/SMC concepts
+        # (BOS/CHoCH, order blocks, liquidity sweeps) are classically
+        # breakout/trend-following reads, so they deserve more confidence
+        # in a confirmed trend and less in a genuinely range-bound market.
+        # Same non-gating, purely additive pattern as every component
+        # above - "unknown"/insufficient-data regime contributes nothing.
+        regime = results.get("market_regime", {}).get("regime")
+        if regime == "trending":
+            score += 3
+        elif regime == "ranging":
+            score -= 3
+
         # Clamp between 0-100
         raw_score = max(0.0, min(100.0, score))
 
@@ -2480,4 +2581,4 @@ class AnalysisEngine:
         except Exception as e:
             logger.error(f"News API error: {e}")
         
-        return 0.0 
+        return 0.0
