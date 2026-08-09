@@ -73,15 +73,24 @@ def get_dynamic_tp_sl(side: str, entry_price: float, analysis: Dict) -> Tuple[Op
     candidate levels, same STRENGTH-based selection, NO clamp - so this
     backtest measures precisely what the live bot would have done.
 
-    FIX (sync with live bot): this used to select the NEAREST candidate
-    level and clamp the distance to [0.5x, 3x] of the fixed %, which is
-    what the live bot's TP/SL logic ALSO used to do - but the live bot was
-    later changed (per explicit request) to (1) drop the clamp entirely,
-    using the detected level exactly as-is, and (2) select the STRONGEST
-    candidate (by OB displacement / FVG size / liquidity-type weight)
-    instead of the nearest one. This function had fallen out of sync with
-    that change, silently backtesting a version of "dynamic TP/SL" the
-    live bot no longer actually runs.
+    FIX (sync with live bot, latest round - user requested 3 TP/SL quality
+    improvements be backported here too): the live bot's TP/SL selection
+    was changed again since this mirror was last updated:
+      1) Volume Profile (POC / Value Area) added as extra candidate levels
+         - computed here the exact same way (from OHLC alone, no live data
+         needed), so this backtest now includes them too.
+      2) Every "fixed weight" candidate (Liquidity, PDH/PDL, PWH/PWL, Old
+         Highs/Lows, Volume Profile POC/VA) is now scaled by this
+         timeframe's own ATR instead of a flat fraction of entry_price -
+         same relative hierarchy as before, now volatility-adaptive.
+      3) TP selection now prefers the strongest candidate that ALSO gives
+         >= 1:1 reward:risk against the chosen SL, falling back to the
+         pool's absolute strongest candidate (the old behavior) only when
+         no candidate clears that bar. SL selection is unchanged.
+    This function had fallen out of sync with that change before (see the
+    two FIX comments still further down for the earlier drift) - updated
+    here verbatim to match, so this backtest keeps measuring what the live
+    bot actually does today, not an older version of it.
     """
     resistance_candidates = []  # list of (level, strength)
     support_candidates = []
@@ -90,6 +99,13 @@ def get_dynamic_tp_sl(side: str, entry_price: float, analysis: Dict) -> Tuple[Op
         tf = analysis.get(tf_name)
         if not tf:
             continue
+
+        # ATR-based weighting basis (fix #2 above) - mirrors
+        # entry_price*0.005 (the OLD internal-liquidity weight) when ATR
+        # isn't available for some reason, so that fallback path
+        # reproduces the exact old numbers.
+        atr = tf.get("fvg", {}).get("atr")
+        atr_basis = atr if atr else entry_price * 0.005
 
         ob = tf.get("order_block", {})
         bear_ob = ob.get("bearish_ob")
@@ -109,7 +125,7 @@ def get_dynamic_tp_sl(side: str, entry_price: float, analysis: Dict) -> Tuple[Op
                 support_candidates.append((fvg["high"], fvg_strength))
 
         liq = tf.get("liquidity", {})
-        liq_strength = entry_price * (0.01 if liq.get("external_swept") else 0.005)
+        liq_strength = atr_basis * (2.0 if liq.get("external_swept") else 1.0)
         if liq.get("buyside_liquidity"):
             resistance_candidates.append((liq["buyside_liquidity"], liq_strength))
         if liq.get("sellside_liquidity"):
@@ -118,38 +134,76 @@ def get_dynamic_tp_sl(side: str, entry_price: float, analysis: Dict) -> Tuple[Op
         # FIX (out of sync with live bot): bot_core._get_analysis_based_tp_sl()
         # was later extended (per explicit request) to also consider Macro
         # Structure (Previous Day/Week High-Low) and Old Highs/Lows as
-        # candidate TP/SL levels - weighted as fixed fractions of
-        # entry_price, same pattern as the liquidity weighting above. This
-        # backtest function's docstring claims to mirror that function
-        # "exactly", but this block was never backported here, so every
-        # dynamic-TP/SL backtest run silently tested an OLDER version of
-        # the live bot's own logic. Added here verbatim to match.
+        # candidate TP/SL levels - weighted by ATR (fix #2 above), same
+        # relative hierarchy as the liquidity weighting: weekly > daily >
+        # old (1-6 month) swing levels.
         ict = tf.get("ict_smc", {})
         if ict.get("pdh") is not None:
-            resistance_candidates.append((ict["pdh"], entry_price * 0.008))
+            resistance_candidates.append((ict["pdh"], atr_basis * 1.6))
         if ict.get("pdl") is not None:
-            support_candidates.append((ict["pdl"], entry_price * 0.008))
+            support_candidates.append((ict["pdl"], atr_basis * 1.6))
         if ict.get("pwh") is not None:
-            resistance_candidates.append((ict["pwh"], entry_price * 0.015))
+            resistance_candidates.append((ict["pwh"], atr_basis * 3.0))
         if ict.get("pwl") is not None:
-            support_candidates.append((ict["pwl"], entry_price * 0.015))
+            support_candidates.append((ict["pwl"], atr_basis * 3.0))
         for lvl in ict.get("old_highs", []):
-            resistance_candidates.append((lvl, entry_price * 0.006))
+            resistance_candidates.append((lvl, atr_basis * 1.2))
         for lvl in ict.get("old_lows", []):
-            support_candidates.append((lvl, entry_price * 0.006))
+            support_candidates.append((lvl, atr_basis * 1.2))
+
+        # Volume Profile (POC / Value Area) - fix #1 above. Computed purely
+        # from this timeframe's own OHLC (no live data needed), so it
+        # works identically in this offline backtest as it does live.
+        vp = tf.get("volume_profile", {})
+        poc = vp.get("poc_price")
+        if poc is not None:
+            weight = atr_basis * 2.4
+            if poc > entry_price:
+                resistance_candidates.append((poc, weight))
+            elif poc < entry_price:
+                support_candidates.append((poc, weight))
+        va_high = vp.get("value_area_high")
+        if va_high is not None and va_high > entry_price:
+            resistance_candidates.append((va_high, atr_basis * 1.6))
+        va_low = vp.get("value_area_low")
+        if va_low is not None and va_low < entry_price:
+            support_candidates.append((va_low, atr_basis * 1.6))
 
     if side == "BUY":
         tp_pool = [(lvl, s) for lvl, s in resistance_candidates if lvl > entry_price]
         sl_pool = [(lvl, s) for lvl, s in support_candidates if lvl < entry_price]
-        tp_level = max(tp_pool, key=lambda x: x[1])[0] if tp_pool else None
         sl_level = max(sl_pool, key=lambda x: x[1])[0] if sl_pool else None
+        tp_level = _pick_tp_with_rr(tp_pool, entry_price, sl_level) if tp_pool else None
     else:
         tp_pool = [(lvl, s) for lvl, s in support_candidates if lvl < entry_price]
         sl_pool = [(lvl, s) for lvl, s in resistance_candidates if lvl > entry_price]
-        tp_level = max(tp_pool, key=lambda x: x[1])[0] if tp_pool else None
         sl_level = max(sl_pool, key=lambda x: x[1])[0] if sl_pool else None
+        tp_level = _pick_tp_with_rr(tp_pool, entry_price, sl_level) if tp_pool else None
 
     return tp_level, sl_level
+
+
+def _pick_tp_with_rr(tp_pool: List[Tuple[float, float]], entry_price: float,
+                      sl_level: Optional[float]) -> float:
+    """
+    Standalone mirror of bot_core.HackerAIBot._pick_tp_with_rr() - see that
+    method's docstring for the full reasoning. Prefers the strongest TP
+    candidate that gives >= 1:1 reward:risk against the chosen SL, falling
+    back to the pool's absolute strongest candidate otherwise.
+    """
+    strongest = max(tp_pool, key=lambda x: x[1])[0]
+    if sl_level is None:
+        return strongest
+
+    risk = abs(entry_price - sl_level)
+    if risk <= 0:
+        return strongest
+
+    qualifying = [(lvl, s) for lvl, s in tp_pool if abs(lvl - entry_price) >= risk]
+    if qualifying:
+        return max(qualifying, key=lambda x: x[1])[0]
+
+    return strongest
 
 
 def simulate_outcome_at_prices(lower_df: pd.DataFrame, entry_idx: int, direction: str,
