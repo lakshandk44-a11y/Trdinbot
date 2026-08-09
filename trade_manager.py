@@ -815,9 +815,28 @@ class TradeManager:
         # normal path first (Telegram sent as always), and this only
         # fires for a genuine manual/external close (flat on Binance
         # despite price never having reached either level).
+        # FIX (regression found by user - trades vanishing from local
+        # tracking with no "closed" Telegram message, on trades that were
+        # NEVER actually closed, mid-trailing): a SINGLE "flat" reading
+        # from Binance's position-risk endpoint isn't reliable enough to
+        # act on immediately - transient/eventual-consistency blips (e.g.
+        # right after a trailing-stop order cancel+replace, which happen
+        # frequently on an actively-trailing, healthy trade) can
+        # occasionally report a momentarily-stale "flat" reading for a
+        # trade that's still genuinely open on Binance. Now requires 2
+        # CONSECUTIVE positive "flat" readings (~5s apart, one per
+        # monitor cycle) before treating this as a real manual/external
+        # close - a single blip just gets noted and re-checked next
+        # cycle (this trade's TP/SL/trailing logic for THIS cycle already
+        # ran normally above, completely unaffected), while a genuine
+        # close is still caught within ~10 seconds either way.
         if self.client and self._is_closed_on_exchange(trade["symbol"], trade):
-            self._handle_externally_closed_trade(trade)
-            return
+            trade["_ext_close_confirms"] = trade.get("_ext_close_confirms", 0) + 1
+            if trade["_ext_close_confirms"] >= 2:
+                self._handle_externally_closed_trade(trade)
+                return
+        else:
+            trade["_ext_close_confirms"] = 0
         
         # REDESIGN (trailing stop, per explicit request): reverted the
         # tp_stage>=2 gate - trailing is active from trade open again, not
