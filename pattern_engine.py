@@ -117,6 +117,82 @@ def _breakout_volume_score(volume: Optional[np.ndarray], formation_start: int, f
         return 0.0
 
 
+def _compute_rsi(close: np.ndarray, period: int = 14) -> np.ndarray:
+    """
+    ADDED (user request, pattern_engine-only, stronger pattern confidence):
+    self-contained RSI (Wilder's method) - completely independent of the
+    rest of the bot (analysis_engine's own indicators are untouched), used
+    only for the divergence confirmation checks inside this file below.
+    Returns an array aligned 1:1 with `close`, defaulting to a neutral 50.0
+    wherever there isn't enough history yet to compute a real value.
+    """
+    n = len(close)
+    rsi = np.full(n, 50.0)
+    if n < period + 1:
+        return rsi
+    deltas = np.diff(close)
+    gains = np.where(deltas > 0, deltas, 0.0)
+    losses = np.where(deltas < 0, -deltas, 0.0)
+    avg_gain = float(np.mean(gains[:period]))
+    avg_loss = float(np.mean(losses[:period]))
+    for i in range(period, n - 1):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+        rs = avg_gain / avg_loss if avg_loss > 0 else 100.0
+        rsi[i + 1] = 100.0 - (100.0 / (1.0 + rs))
+    return rsi
+
+
+def _divergence_score(rsi: np.ndarray, idx1: int, idx2: int, bullish: bool, max_points: float) -> float:
+    """
+    ADDED (user request, pattern_engine-only, stronger pattern confidence):
+    classical RSI divergence - price makes a similar/more-extreme high (or
+    low) at idx2 vs idx1 while momentum (RSI) FAILS to confirm it, a
+    well-established warning sign that the move driving the pattern is
+    losing strength (directly supports a reversal read). idx1/idx2 index
+    into this SAME timeframe's own two key pattern swing points (e.g. the
+    two peaks of a Double Top).
+
+    bullish=True means we want RSI to be HIGHER at idx2 (momentum
+    improving into a bullish reversal's 2nd low); bullish=False means we
+    want RSI LOWER at idx2 (momentum weakening into a bearish reversal's
+    2nd high). Scales smoothly from 0 to max_points over a 0-5 RSI-point
+    gap, full points at >=5. Out-of-range indices return max_points*0.5
+    (neutral) rather than penalizing - this must never be a hard
+    requirement given how noisy RSI can be on short lookbacks.
+    """
+    if idx1 < 0 or idx2 < 0 or idx1 >= len(rsi) or idx2 >= len(rsi):
+        return max_points * 0.5
+    r1, r2 = rsi[idx1], rsi[idx2]
+    diff = (r2 - r1) if bullish else (r1 - r2)
+    if diff >= 5:
+        return max_points
+    elif diff >= 0:
+        return max_points * (diff / 5)
+    else:
+        return 0.0
+
+
+def _compute_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) -> float:
+    """
+    ADDED (user request, pattern_engine-only): self-contained ATR
+    (Wilder's True Range, simple-averaged) - independent of the rest of
+    the bot, used only to give the invalidation (stop) level below a
+    small volatility-scaled buffer instead of sitting exactly on the raw
+    structural boundary with zero room - the same zero-buffer risk found
+    and fixed earlier in the TP1->TP2 extension logic, applied here to
+    pattern-engine's own stop level.
+    """
+    n = len(close)
+    if n < 2:
+        return 0.0
+    trs = np.zeros(n - 1)
+    for i in range(1, n):
+        trs[i - 1] = max(high[i] - low[i], abs(high[i] - close[i - 1]), abs(low[i] - close[i - 1]))
+    window = trs[-period:] if len(trs) >= period else trs
+    return float(np.mean(window)) if len(window) else 0.0
+
+
 def _extract_arrays(ohlc: pd.DataFrame):
     high = ohlc["high"].values.astype(float)
     low = ohlc["low"].values.astype(float)
@@ -206,10 +282,11 @@ def detect_double_top(ohlc: pd.DataFrame) -> Optional[Dict]:
         second peak
     Weighted confidence (out of 100):
       30 - peak similarity (closer = higher score, tapers out past 3%)
-      25 - trough retracement depth is meaningful (3-15% ideal)
+      20 - trough retracement depth is meaningful (3-15% ideal)
       20 - neckline breakdown actually confirmed (hard structural check)
       15 - volume lower on 2nd peak than 1st (classical distribution signal)
       10 - breakout bar(s) show a volume spike vs the pattern's own formation
+      5  - RSI bearish divergence (2nd peak weaker momentum than 1st)
     """
     high, low, close, volume = _extract_arrays(ohlc)
     if len(close) < 30:
@@ -238,11 +315,11 @@ def detect_double_top(ohlc: pd.DataFrame) -> Optional[Dict]:
 
     retracement = (peak1 - trough) / peak1 if peak1 > 0 else 0
     if 0.03 <= retracement <= 0.15:
-        score += 25
+        score += 20
     elif retracement > 0.15:
-        score += 25 * max(0.0, 1 - (retracement - 0.15) / 0.15)
+        score += 20 * max(0.0, 1 - (retracement - 0.15) / 0.15)
     elif retracement > 0:
-        score += 25 * (retracement / 0.03)
+        score += 20 * (retracement / 0.03)
 
     # FIX (false-positive bug): "any close below neckline anywhere in the
     # rest of the data" is true for most random walks given enough bars -
@@ -271,18 +348,28 @@ def detect_double_top(ohlc: pd.DataFrame) -> Optional[Dict]:
     # pattern" check above - see _breakout_volume_score docstring.
     score += _breakout_volume_score(volume, peak1_idx, peak2_idx, len(close) - 2, 10)
 
+    # ADDED (user request, stronger pattern confidence): RSI bearish
+    # divergence - see _divergence_score docstring.
+    rsi = _compute_rsi(close)
+    score += _divergence_score(rsi, peak1_idx, peak2_idx, bullish=False, max_points=5)
+
     if score < 30 or not breakdown:  # structural minimum: needs the confirmed breakdown
         return None
 
     neckline = trough
     head_height = ((peak1 + peak2) / 2) - neckline
+    # ADDED (user request, stronger SL/TP): small ATR buffer above the raw
+    # structural boundary, same zero-buffer-risk fix as the earlier
+    # TP1->TP2 SL buffer - gives the stop room to breathe against normal
+    # noise instead of sitting exactly on the swing high.
+    atr = _compute_atr(high, low, close)
     return {
         "pattern": "Double Top",
         "direction": "SELL",
         "confidence": round(min(score, 100.0), 1),
         "entry_anchor": float(close[-1]),
         "target": neckline - head_height,
-        "invalidation": max(peak1, peak2),
+        "invalidation": max(peak1, peak2) + atr * 0.3,
     }
 
 
@@ -315,11 +402,11 @@ def detect_double_bottom(ohlc: pd.DataFrame) -> Optional[Dict]:
 
     bounce = (peak - bottom1) / bottom1 if bottom1 > 0 else 0
     if 0.03 <= bounce <= 0.15:
-        score += 25
+        score += 20
     elif bounce > 0.15:
-        score += 25 * max(0.0, 1 - (bounce - 0.15) / 0.15)
+        score += 20 * max(0.0, 1 - (bounce - 0.15) / 0.15)
     elif bounce > 0:
-        score += 25 * (bounce / 0.03)
+        score += 20 * (bounce / 0.03)
 
     after = close[bottom2_idx + 1:]
     if len(after) < 1:
@@ -343,18 +430,26 @@ def detect_double_bottom(ohlc: pd.DataFrame) -> Optional[Dict]:
     # pattern" check above - see _breakout_volume_score docstring.
     score += _breakout_volume_score(volume, bottom1_idx, bottom2_idx, len(close) - 2, 10)
 
+    # ADDED (user request, stronger pattern confidence): RSI bullish
+    # divergence - see _divergence_score docstring.
+    rsi = _compute_rsi(close)
+    score += _divergence_score(rsi, bottom1_idx, bottom2_idx, bullish=True, max_points=5)
+
     if score < 30 or not breakout:
         return None
 
     neckline = peak
     head_depth = neckline - ((bottom1 + bottom2) / 2)
+    # ADDED (user request, stronger SL/TP): small ATR buffer below the raw
+    # structural boundary - see the Double Top ATR-buffer comment above.
+    atr = _compute_atr(high, low, close)
     return {
         "pattern": "Double Bottom",
         "direction": "BUY",
         "confidence": round(min(score, 100.0), 1),
         "entry_anchor": float(close[-1]),
         "target": neckline + head_depth,
-        "invalidation": min(bottom1, bottom2),
+        "invalidation": min(bottom1, bottom2) - atr * 0.3,
     }
 
 
@@ -371,11 +466,12 @@ def detect_head_and_shoulders(ohlc: pd.DataFrame) -> Optional[Dict]:
       - Confirmed by a close below the neckline after the right shoulder
     Weighted confidence (out of 100):
       20 - head clearly higher than both shoulders
-      20 - shoulder symmetry (similar height)
+      15 - shoulder symmetry (similar height)
       15 - neckline roughly horizontal (troughs at similar level)
       20 - neckline breakdown confirmed (hard structural check)
       15 - volume declining shoulder->head->shoulder
       10 - breakout bar(s) show a volume spike vs the pattern's own formation
+      5  - RSI bearish divergence (right shoulder weaker momentum than left)
     """
     high, low, close, volume = _extract_arrays(ohlc)
     if len(close) < 40:
@@ -408,9 +504,9 @@ def detect_head_and_shoulders(ohlc: pd.DataFrame) -> Optional[Dict]:
 
     shoulder_diff = _pct_diff(ls, rs)
     if shoulder_diff <= 0.012:
-        score += 20
+        score += 15
     elif shoulder_diff <= 0.035:
-        score += 20 * (1 - (shoulder_diff - 0.012) / 0.023)
+        score += 15 * (1 - (shoulder_diff - 0.012) / 0.023)
 
     neckline_diff = _pct_diff(t1, t2)
     if neckline_diff <= 0.008:
@@ -442,17 +538,25 @@ def detect_head_and_shoulders(ohlc: pd.DataFrame) -> Optional[Dict]:
     # volume" check above - see _breakout_volume_score docstring.
     score += _breakout_volume_score(volume, ls_idx, rs_idx, len(close) - 2, 10)
 
+    # ADDED (user request, stronger pattern confidence): RSI bearish
+    # divergence between the two shoulders - see _divergence_score docstring.
+    rsi = _compute_rsi(close)
+    score += _divergence_score(rsi, ls_idx, rs_idx, bullish=False, max_points=5)
+
     if score < 40 or not breakdown:
         return None
 
     head_height = head - neckline_level
+    # ADDED (user request, stronger SL/TP): small ATR buffer above the raw
+    # structural boundary - see the Double Top ATR-buffer comment above.
+    atr = _compute_atr(high, low, close)
     return {
         "pattern": "Head & Shoulders",
         "direction": "SELL",
         "confidence": round(min(score, 100.0), 1),
         "entry_anchor": float(close[-1]),
         "target": neckline_level - head_height,
-        "invalidation": max(ls, head, rs),
+        "invalidation": max(ls, head, rs) + atr * 0.3,
     }
 
 
@@ -489,9 +593,9 @@ def detect_inverse_head_and_shoulders(ohlc: pd.DataFrame) -> Optional[Dict]:
 
     shoulder_diff = _pct_diff(ls, rs)
     if shoulder_diff <= 0.012:
-        score += 20
+        score += 15
     elif shoulder_diff <= 0.035:
-        score += 20 * (1 - (shoulder_diff - 0.012) / 0.023)
+        score += 15 * (1 - (shoulder_diff - 0.012) / 0.023)
 
     neckline_diff = _pct_diff(p1, p2)
     if neckline_diff <= 0.008:
@@ -523,17 +627,25 @@ def detect_inverse_head_and_shoulders(ohlc: pd.DataFrame) -> Optional[Dict]:
     # volume" check above - see _breakout_volume_score docstring.
     score += _breakout_volume_score(volume, ls_idx, rs_idx, len(close) - 2, 10)
 
+    # ADDED (user request, stronger pattern confidence): RSI bullish
+    # divergence between the two shoulders - see _divergence_score docstring.
+    rsi = _compute_rsi(close)
+    score += _divergence_score(rsi, ls_idx, rs_idx, bullish=True, max_points=5)
+
     if score < 40 or not breakout:
         return None
 
     head_depth = neckline_level - head
+    # ADDED (user request, stronger SL/TP): small ATR buffer below the raw
+    # structural boundary - see the Double Top ATR-buffer comment above.
+    atr = _compute_atr(high, low, close)
     return {
         "pattern": "Inverse Head & Shoulders",
         "direction": "BUY",
         "confidence": round(min(score, 100.0), 1),
         "entry_anchor": float(close[-1]),
         "target": neckline_level + head_depth,
-        "invalidation": min(ls, head, rs),
+        "invalidation": min(ls, head, rs) - atr * 0.3,
     }
 
 
@@ -550,10 +662,13 @@ def detect_bull_flag(ohlc: pd.DataFrame) -> Optional[Dict]:
       - Confirmed by a breakout above the flag's upper bound
     Weighted confidence (out of 100):
       30 - flagpole is a genuine sharp impulse (strong % move over a short window)
-      25 - flag consolidation range is tight relative to the flagpole (low volatility)
+      20 - flag consolidation range is tight relative to the flagpole (low volatility)
       15 - flag drifts flat/slightly down (not up - a rising channel isn't a flag)
       20 - breakout above flag high confirmed
       10 - breakout bar shows a volume spike vs the flag's own (quiet) consolidation
+      5  - momentum cooled off during the flag (RSI eased from the pole's high,
+           leaving room to run again - a flag that stays maximally overbought
+           throughout is a classic exhaustion warning, not a healthy pause)
     """
     high, low, close, volume = _extract_arrays(ohlc)
     n = len(close)
@@ -582,9 +697,9 @@ def detect_bull_flag(ohlc: pd.DataFrame) -> Optional[Dict]:
         score += 30 * min(1.0, pole_move / 0.08)
 
     if flag_range_pct <= pole_move * 0.5:
-        score += 25
+        score += 20
     elif flag_range_pct <= pole_move:
-        score += 25 * (1 - (flag_range_pct - pole_move * 0.5) / (pole_move * 0.5 + 1e-9))
+        score += 20 * (1 - (flag_range_pct - pole_move * 0.5) / (pole_move * 0.5 + 1e-9))
 
     flag_drift = (close[-2] - close[pole_end]) / close[pole_end] if close[pole_end] > 0 else 0
     if -0.03 <= flag_drift <= 0.01:
@@ -602,22 +717,41 @@ def detect_bull_flag(ohlc: pd.DataFrame) -> Optional[Dict]:
     # consolidation - see _breakout_volume_score docstring.
     score += _breakout_volume_score(volume, pole_end, n - 1, n - 1, 10)
 
+    # ADDED (user request, stronger pattern confidence): momentum-pause
+    # check - RSI should have eased from its reading at the top of the
+    # pole into the flag consolidation, not stayed pinned at an extreme
+    # (a healthy pause gives the move room to continue; a flag that never
+    # cools off is a classic exhaustion warning).
+    rsi = _compute_rsi(close)
+    pole_top_idx = pole_end - 1
+    flag_end_idx = n - 2
+    if 0 <= pole_top_idx < len(rsi) and 0 <= flag_end_idx < len(rsi):
+        cooled = rsi[pole_top_idx] - rsi[flag_end_idx]
+        if cooled >= 5:
+            score += 5
+        elif cooled >= 0:
+            score += 5 * (cooled / 5)
+
     if score < 40 or pole_move < 0.03 or not breakout:
         return None
 
     pole_height = close[pole_end - 1] - close[pole_start]
+    # ADDED (user request, stronger SL/TP): small ATR buffer below the raw
+    # structural boundary - see the Double Top ATR-buffer comment above.
+    atr = _compute_atr(high, low, close)
     return {
         "pattern": "Bull Flag",
         "direction": "BUY",
         "confidence": round(min(score, 100.0), 1),
         "entry_anchor": float(close[-1]),
         "target": flag_high + pole_height,
-        "invalidation": flag_low,
+        "invalidation": flag_low - atr * 0.3,
     }
 
 
 def detect_bear_flag(ohlc: pd.DataFrame) -> Optional[Dict]:
-    """Mirror of Bull Flag - bearish continuation."""
+    """Mirror of Bull Flag - bearish continuation. Same weighting scheme
+    (30/20/15/20/10/5) and same momentum-pause + ATR-buffer additions."""
     high, low, close, volume = _extract_arrays(ohlc)
     n = len(close)
     if n < 30:
@@ -645,9 +779,9 @@ def detect_bear_flag(ohlc: pd.DataFrame) -> Optional[Dict]:
         score += 30 * min(1.0, pole_move / 0.08)
 
     if flag_range_pct <= pole_move * 0.5:
-        score += 25
+        score += 20
     elif flag_range_pct <= pole_move:
-        score += 25 * (1 - (flag_range_pct - pole_move * 0.5) / (pole_move * 0.5 + 1e-9))
+        score += 20 * (1 - (flag_range_pct - pole_move * 0.5) / (pole_move * 0.5 + 1e-9))
 
     flag_drift = (close[pole_end] - close[-2]) / close[pole_end] if close[pole_end] > 0 else 0
     if -0.03 <= flag_drift <= 0.01:
@@ -665,17 +799,33 @@ def detect_bear_flag(ohlc: pd.DataFrame) -> Optional[Dict]:
     # consolidation - see _breakout_volume_score docstring.
     score += _breakout_volume_score(volume, pole_end, n - 1, n - 1, 10)
 
+    # ADDED (user request, stronger pattern confidence): momentum-pause
+    # check - see the mirrored comment in detect_bull_flag above (here,
+    # RSI should have eased UP from an oversold pole reading).
+    rsi = _compute_rsi(close)
+    pole_top_idx = pole_end - 1
+    flag_end_idx = n - 2
+    if 0 <= pole_top_idx < len(rsi) and 0 <= flag_end_idx < len(rsi):
+        cooled = rsi[flag_end_idx] - rsi[pole_top_idx]
+        if cooled >= 5:
+            score += 5
+        elif cooled >= 0:
+            score += 5 * (cooled / 5)
+
     if score < 40 or pole_move < 0.03 or not breakout:
         return None
 
     pole_height = close[pole_start] - close[pole_end - 1]
+    # ADDED (user request, stronger SL/TP): small ATR buffer above the raw
+    # structural boundary - see the Double Top ATR-buffer comment above.
+    atr = _compute_atr(high, low, close)
     return {
         "pattern": "Bear Flag",
         "direction": "SELL",
         "confidence": round(min(score, 100.0), 1),
         "entry_anchor": float(close[-1]),
         "target": flag_low - pole_height,
-        "invalidation": flag_high,
+        "invalidation": flag_high + atr * 0.3,
     }
 
 
