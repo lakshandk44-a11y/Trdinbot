@@ -768,6 +768,25 @@ class TradeManager:
 
         self._save_state()
 
+        # FIX (regression found by user - genuine closes going silent):
+        # this path used to never notify at all, on the assumption it was
+        # always a deliberate manual close the user already knows about.
+        # In practice it also fires when the exchange's own resting SL/TP
+        # order fills on a live price tick faster than the bot's own
+        # periodic price polling can catch up to (see
+        # _CLOSE_REASON_LABELS's "RECONCILED_CLOSED_EXTERNALLY" comment) -
+        # a perfectly real close the user still needs to hear about, using
+        # the best data available (last known price/PnL at detection time,
+        # same fields _close_trade's own notification already relies on).
+        # Wrapped in the exact same try/except pattern _close_trade uses
+        # for its own Telegram send - a notify failure here can never
+        # affect the bookkeeping above, which has already completed.
+        if _TELEGRAM_AVAILABLE:
+            try:
+                send_telegram(format_trade_closed(popped))
+            except Exception as e:
+                logger.warning(f"Telegram notify (external close) failed for {symbol}: {e}")
+
     def _evaluate_trade(self, trade: Dict):
         """Evaluate trade for SL/TP/trailing"""
         if trade["status"] != "OPEN":
