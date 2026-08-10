@@ -749,6 +749,16 @@ class TradeManager:
         like reconcile_with_exchange() does, and frees up its
         MAX_OPEN_TRADES slot immediately. Does not touch or affect any
         OTHER open trade's SL/TP/trailing/TP1-2-3 logic in any way.
+
+        FIX (user request, corrected): the Telegram notification for this
+        path must look IDENTICAL to _close_trade()'s own message - same
+        PnL%/Real PnL (Binance) USDT/Balance now fields, computed the
+        SAME way (fee-adjusted pnl_percent, real balance/income fetched
+        fresh from Binance) - not a stripped-down version. Reason is
+        labeled "MANUAL_CLOSE" (the same pre-existing, already-labeled
+        reason _CLOSE_REASON_LABELS uses elsewhere) since from the bot's
+        perspective this path means exactly that: the position closed
+        without the bot's own SL/TP price check having triggered it.
         """
         symbol = trade["symbol"]
         logger.warning(f"♻️ {symbol} was tracked locally but has no open position on "
@@ -762,28 +772,53 @@ class TradeManager:
             popped = self.open_trades.pop(symbol)
             popped["close_time"] = datetime.now()
             popped["close_price"] = popped.get("current_price", popped.get("entry_price"))
-            popped["close_reason"] = "RECONCILED_CLOSED_EXTERNALLY"
+            popped["close_reason"] = "MANUAL_CLOSE"
             popped["status"] = "CLOSED"
+
+            # Same fee-adjusted pnl_percent calculation _close_trade() uses,
+            # so this trade's win/loss classification and displayed % is
+            # computed identically either way it closes.
+            if popped["side"] == "BUY":
+                final_pnl = (popped["close_price"] - popped["entry_price"]) / popped["entry_price"]
+            else:
+                final_pnl = (popped["entry_price"] - popped["close_price"]) / popped["entry_price"]
+            leverage = popped.get("leverage", 1)
+            gross_pnl_percent = final_pnl * 100 * leverage
+            fee_percent_per_side = self.config.get("TRADING_FEE_PERCENT", 0.05)
+            fee_cost_percent = 2 * fee_percent_per_side * leverage
+            popped["pnl_percent_gross"] = gross_pnl_percent
+            popped["pnl_percent"] = gross_pnl_percent - fee_cost_percent
+            popped["fee_cost_percent"] = fee_cost_percent
+
             self.trade_history.append(popped)
 
         self._save_state()
 
-        # FIX (regression found by user - genuine closes going silent):
-        # this path used to never notify at all, on the assumption it was
-        # always a deliberate manual close the user already knows about.
-        # In practice it also fires when the exchange's own resting SL/TP
-        # order fills on a live price tick faster than the bot's own
-        # periodic price polling can catch up to (see
-        # _CLOSE_REASON_LABELS's "RECONCILED_CLOSED_EXTERNALLY" comment) -
-        # a perfectly real close the user still needs to hear about, using
-        # the best data available (last known price/PnL at detection time,
-        # same fields _close_trade's own notification already relies on).
-        # Wrapped in the exact same try/except pattern _close_trade uses
-        # for its own Telegram send - a notify failure here can never
-        # affect the bookkeeping above, which has already completed.
         if _TELEGRAM_AVAILABLE:
             try:
-                send_telegram(format_trade_closed(popped))
+                current_balance = None
+                try:
+                    acc = self.client.account()
+                    for asset in acc.get("assets", []):
+                        if asset.get("asset") == "USDT":
+                            current_balance = float(asset["walletBalance"])
+                            break
+                except Exception as e:
+                    logger.warning(f"Could not fetch balance for Telegram notify: {e}")
+
+                real_pnl_usdt = None
+                try:
+                    entry_ms = int(popped["entry_time"].timestamp() * 1000)
+                    records = self.client.income(
+                        symbol=symbol, income_type="REALIZED_PNL",
+                        start_time=entry_ms, limit=50
+                    )
+                    if isinstance(records, list):
+                        real_pnl_usdt = sum(float(r.get("income", 0)) for r in records)
+                except Exception as e:
+                    logger.warning(f"Could not fetch real PnL from Binance for Telegram notify: {e}")
+
+                send_telegram(format_trade_closed(popped, current_balance, real_pnl_usdt))
             except Exception as e:
                 logger.warning(f"Telegram notify (external close) failed for {symbol}: {e}")
 
