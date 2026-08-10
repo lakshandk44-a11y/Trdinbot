@@ -134,6 +134,15 @@ _CLOSE_REASON_LABELS = {
     "STOP_LOSS":       ("🛑", "Stop Loss Hit"),
     "REVERSAL_SIGNAL": ("🔄", "Reversal Signal"),
     "MANUAL_CLOSE":    ("✋", "Manually Closed"),
+    # ADDED (user request, regression fix): fires when the bot notices the
+    # position is no longer open on Binance without its own SL/TP price
+    # check having caught it first - genuinely either a manual close, OR
+    # (more often in practice) the exchange's own resting SL/TP order
+    # filling on a live price tick faster than the bot's own periodic
+    # price polling could catch up to. Labeled honestly as ambiguous
+    # rather than asserting "manual" when it may well have been a normal
+    # SL/TP fill the bot just found out about a little late.
+    "RECONCILED_CLOSED_EXTERNALLY": ("♻️", "Closed Externally (manual close or SL/TP filled faster than price poll)"),
 }
 
 
