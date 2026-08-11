@@ -750,15 +750,29 @@ class TradeManager:
         MAX_OPEN_TRADES slot immediately. Does not touch or affect any
         OTHER open trade's SL/TP/trailing/TP1-2-3 logic in any way.
 
-        FIX (user request, corrected): the Telegram notification for this
-        path must look IDENTICAL to _close_trade()'s own message - same
-        PnL%/Real PnL (Binance) USDT/Balance now fields, computed the
-        SAME way (fee-adjusted pnl_percent, real balance/income fetched
-        fresh from Binance) - not a stripped-down version. Reason is
-        labeled "MANUAL_CLOSE" (the same pre-existing, already-labeled
-        reason _CLOSE_REASON_LABELS uses elsewhere) since from the bot's
-        perspective this path means exactly that: the position closed
-        without the bot's own SL/TP price check having triggered it.
+        FIX (user request, corrected AGAIN - regression found live): the
+        previous version of this fix hardcoded close_reason="MANUAL_CLOSE"
+        unconditionally, which turned out to be WRONG most of the time in
+        practice - this path fires whenever the bot notices the exchange
+        position went flat before its OWN price-based SL/TP check caught
+        it, and the single most common real-world cause of that (as this
+        user's own DODOXUSDT report showed - a PROFITABLE close, right
+        where the trailing stop had been walking the SL up to) is the
+        exchange's own resting stop order firing on a live price tick -
+        including a TRAILING-adjusted stop - faster than the bot's
+        periodic price polling could catch up to. That is a completely
+        automatic, bot-driven close; calling it "Manually Closed" is
+        simply inaccurate and misleading.
+
+        Now classifies using the best evidence actually available: if the
+        close price landed within 1% of this trade's own (possibly
+        trailing-adjusted) stop_loss or take_profit level, it's labeled
+        STOP_LOSS / TAKE_PROFIT respectively - exactly like a normal
+        _close_trade() close, since that's almost certainly what
+        happened. Only falls back to "Manually Closed" when the close
+        price does NOT line up with any known level, since an arbitrary
+        exit price is the actual signature of a genuine manual close on
+        Binance (not a triggered order).
         """
         symbol = trade["symbol"]
         logger.warning(f"♻️ {symbol} was tracked locally but has no open position on "
@@ -772,8 +786,21 @@ class TradeManager:
             popped = self.open_trades.pop(symbol)
             popped["close_time"] = datetime.now()
             popped["close_price"] = popped.get("current_price", popped.get("entry_price"))
-            popped["close_reason"] = "MANUAL_CLOSE"
             popped["status"] = "CLOSED"
+
+            # FIX (user request, corrected AGAIN): evidence-based reason
+            # classification - see docstring above.
+            close_price = popped["close_price"]
+            stop_loss = popped.get("stop_loss")
+            take_profit = popped.get("take_profit")
+            near_sl = stop_loss and close_price > 0 and abs(close_price - stop_loss) / close_price <= 0.01
+            near_tp = take_profit and close_price > 0 and abs(close_price - take_profit) / close_price <= 0.01
+            if near_sl:
+                popped["close_reason"] = "STOP_LOSS"
+            elif near_tp:
+                popped["close_reason"] = "TAKE_PROFIT"
+            else:
+                popped["close_reason"] = "MANUAL_CLOSE"
 
             # Same fee-adjusted pnl_percent calculation _close_trade() uses,
             # so this trade's win/loss classification and displayed % is
