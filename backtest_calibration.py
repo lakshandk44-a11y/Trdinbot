@@ -261,9 +261,21 @@ def fetch_full_history(client: BinanceFuturesClient, symbol: str, interval: str,
 
 
 def slice_up_to(df: pd.DataFrame, current_time: int, limit: int) -> pd.DataFrame:
-    """Returns the last `limit` candles at or before current_time - i.e. exactly
-    the window the live bot would have seen if 'now' were current_time."""
-    sliced = df[df["timestamp"] <= current_time]
+    """Returns the last `limit` candles STRICTLY BEFORE current_time - i.e.
+    exactly the window the live bot would have seen if 'now' were
+    current_time (candles that have actually CLOSED by then, never the
+    candle that's still forming as current_time itself).
+
+    FIX (user request, look-ahead bias): this previously used `<=`, which
+    included the candle whose OWN open timestamp equals current_time -
+    but that candle is the one just STARTING at current_time, so its
+    high/low/close aren't actually known yet at that moment. Using them
+    anyway let the analysis "see" how that candle's price action played
+    out before it happened, making backtested win-rate look better than
+    what the live bot - which only ever sees already-closed candles -
+    could actually achieve. Changed to `<` so only genuinely-closed
+    candles are ever used for signal computation."""
+    sliced = df[df["timestamp"] < current_time]
     return sliced.tail(limit).reset_index(drop=True)
 
 
@@ -394,7 +406,18 @@ def run_calibration_for_symbol(engine: AnalysisEngine, client: BinanceFuturesCli
         if decision not in ("BUY", "SELL") or tools_agreeing < MIN_TOOLS_MATCH:
             continue
 
-        lower_full_idx = lower_df[lower_df["timestamp"] <= current_time].index
+        # FIX (user request, look-ahead bias): mirrors the slice_up_to fix
+        # above - use the last lower-timeframe candle STRICTLY BEFORE
+        # current_time (already fully closed), not `<=` which could
+        # include a candle still forming exactly at current_time whose
+        # close price wouldn't actually be known yet. This is what
+        # decides both the entry price used AND (via entry_idx) exactly
+        # where simulate_outcome starts walking FORWARD from - so this is
+        # also what keeps the outcome-checking side strictly separated
+        # from the signal-computation side, per the two-sided nature of
+        # this fix (past-only for the signal, future-only for the
+        # outcome).
+        lower_full_idx = lower_df[lower_df["timestamp"] < current_time].index
         if len(lower_full_idx) == 0:
             continue
         entry_idx = int(lower_full_idx[-1])
