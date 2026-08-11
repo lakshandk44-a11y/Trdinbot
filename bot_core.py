@@ -1123,7 +1123,7 @@ class HackerAIBot:
         # invalidation and target - i.e. the move hasn't already happened
         # (overextended past target) and the setup hasn't already failed
         # (past invalidation). Also enforces a minimum reward:risk ratio
-        # (>= 1.2:1) - a pattern whose own measured-move target is closer
+        # (>= 0.8:1) - a pattern whose own measured-move target is closer
         # than its own invalidation point is a poor bet even if the
         # direction is right. Both were previously unchecked here, which
         # let trade_manager's own entry-price sanity check silently swap
