@@ -1441,6 +1441,33 @@ class HackerAIBot:
                         f"Qty={quantity} | Lev={final_leverage}x | "
                         f"Pos=${final_position:.2f} | Margin=${margin:.2f}")
 
+            # FIX (user request, real fill price): a MARKET order can fill
+            # at a different price than current_price (the price seen
+            # during the scan, moments before this order was actually
+            # placed) - slippage, especially on lower-liquidity coins, can
+            # make that gap meaningful. Binance's own order response for a
+            # filled MARKET order includes avgPrice (the real average fill
+            # price) and executedQty (the real filled quantity) - using
+            # those instead of the pre-order estimates keeps the LOCAL
+            # trade record (and everything derived from it: TP/SL
+            # distances, PnL%, trailing stop math) matched to what
+            # actually happened on the exchange. Falls back to the
+            # pre-order estimates if the response is missing/zero for any
+            # reason (e.g. an unexpected response shape) - never blocks
+            # the trade from being recorded over this.
+            actual_entry_price = current_price
+            actual_quantity = quantity
+            try:
+                filled_price = float(order.get("avgPrice", 0) or 0)
+                if filled_price > 0:
+                    actual_entry_price = filled_price
+                filled_qty = float(order.get("executedQty", 0) or 0)
+                if filled_qty > 0:
+                    actual_quantity = filled_qty
+            except (TypeError, ValueError) as e:
+                logger.warning(f"{symbol}: could not parse actual fill price/qty from order "
+                                f"response ({e}) - using pre-order estimates instead.")
+
             # FIX (trailing stop redesign): capture ATR(14) at entry so the
             # trailing stop distance can adapt to THIS coin's actual
             # volatility instead of using one fixed % for all scanned coins
@@ -1450,7 +1477,7 @@ class HackerAIBot:
                 entry_atr = (analysis.get("lower", {}).get("fvg", {}).get("atr")
                              or analysis.get("medium", {}).get("fvg", {}).get("atr"))
 
-            # FIX (user request): capture WHICH of the 5 tools agreed and
+            # FIX (user request, real fill price): capture WHICH of the 5 tools agreed and
             # WHICH of their own sub-concepts fired, per timeframe, purely
             # for display in the "Trade Opened" Telegram message. Read-only
             # summary of the exact same already-computed fields the real
@@ -1469,8 +1496,8 @@ class HackerAIBot:
             trade = self.trade_manager.open_new_trade(
                 symbol=symbol,
                 side=side,
-                entry_price=current_price,
-                quantity=quantity,
+                entry_price=actual_entry_price,
+                quantity=actual_quantity,
                 leverage=final_leverage,
                 analysis_result={
                     "signal": signal,
