@@ -750,34 +750,55 @@ class TradeManager:
         MAX_OPEN_TRADES slot immediately. Does not touch or affect any
         OTHER open trade's SL/TP/trailing/TP1-2-3 logic in any way.
 
-        FIX (user request, corrected AGAIN - regression found live): the
-        previous version of this fix hardcoded close_reason="MANUAL_CLOSE"
-        unconditionally, which turned out to be WRONG most of the time in
-        practice - this path fires whenever the bot notices the exchange
-        position went flat before its OWN price-based SL/TP check caught
-        it, and the single most common real-world cause of that (as this
-        user's own DODOXUSDT report showed - a PROFITABLE close, right
-        where the trailing stop had been walking the SL up to) is the
-        exchange's own resting stop order firing on a live price tick -
-        including a TRAILING-adjusted stop - faster than the bot's
-        periodic price polling could catch up to. That is a completely
-        automatic, bot-driven close; calling it "Manually Closed" is
-        simply inaccurate and misleading.
+        FIX (user request, corrected a THIRD time - proximity heuristic
+        still got a real trade wrong live): the previous version guessed
+        "auto vs manual" by checking whether close_price (the bot's own
+        last-POLLED current_price, which can be meaningfully stale - see
+        the close-message-timing fix earlier) landed within 1% of the
+        trade's stored SL/TP level. That's still just a guess, and a
+        stale close_price can miss a real match even when the trailing
+        stop genuinely fired.
 
-        Now classifies using the best evidence actually available: if the
-        close price landed within 1% of this trade's own (possibly
-        trailing-adjusted) stop_loss or take_profit level, it's labeled
-        STOP_LOSS / TAKE_PROFIT respectively - exactly like a normal
-        _close_trade() close, since that's almost certainly what
-        happened. Only falls back to "Manually Closed" when the close
-        price does NOT line up with any known level, since an arbitrary
-        exit price is the actual signature of a genuine manual close on
-        Binance (not a triggered order).
+        Now checks the ACTUAL exchange record FIRST, before guessing:
+        trade["sl_order_id"]/["tp_order_id"] are real Binance algoIds (the
+        same ones new_stop_order() returned when placed/last updated by
+        trailing) - querying GET /fapi/v1/algoOrder for that exact algoId
+        returns "actualPrice", which Binance's own docs confirm is only
+        ever populated once that specific order has actually TRIGGERED
+        and FILLED in the matching engine. A non-zero actualPrice there is
+        first-party proof, not a guess - and gives the REAL fill price
+        too, better than the stale current_price fallback. Only when
+        NEITHER stored order shows a real fill (e.g. genuinely cancelled,
+        or querying fails) does this fall back to the old price-proximity
+        heuristic, and only after THAT fails too does it call it
+        "Manually Closed" - the case where nothing on Binance's own
+        records points to an automatic trigger at all.
         """
         symbol = trade["symbol"]
         logger.warning(f"♻️ {symbol} was tracked locally but has no open position on "
                         f"Binance (closed manually/externally while the bot was running). "
                         f"Removing from local tracking.")
+
+        # FIX (user request, corrected a THIRD time): query the stored
+        # algo order IDs' real status BEFORE cancelling them, so a
+        # genuinely-filled order's record can't be disturbed by our own
+        # cleanup call below.
+        confirmed_reason = None
+        confirmed_price = None
+        for order_id_key, reason_label in (("sl_order_id", "STOP_LOSS"), ("tp_order_id", "TAKE_PROFIT")):
+            algo_id = trade.get(order_id_key)
+            if not algo_id:
+                continue
+            try:
+                algo_order = self.client.query_algo_order(symbol, algo_id)
+                actual_price = float(algo_order.get("actualPrice", 0) or 0)
+                if actual_price > 0:
+                    confirmed_reason = reason_label
+                    confirmed_price = actual_price
+                    break
+            except Exception as e:
+                logger.debug(f"{symbol}: could not query algo order {algo_id} ({order_id_key}): {e}")
+
         self._cancel_protective_orders(symbol, trade)
 
         with self.lock:
@@ -785,22 +806,30 @@ class TradeManager:
                 return
             popped = self.open_trades.pop(symbol)
             popped["close_time"] = datetime.now()
-            popped["close_price"] = popped.get("current_price", popped.get("entry_price"))
             popped["status"] = "CLOSED"
 
-            # FIX (user request, corrected AGAIN): evidence-based reason
-            # classification - see docstring above.
-            close_price = popped["close_price"]
-            stop_loss = popped.get("stop_loss")
-            take_profit = popped.get("take_profit")
-            near_sl = stop_loss and close_price > 0 and abs(close_price - stop_loss) / close_price <= 0.01
-            near_tp = take_profit and close_price > 0 and abs(close_price - take_profit) / close_price <= 0.01
-            if near_sl:
-                popped["close_reason"] = "STOP_LOSS"
-            elif near_tp:
-                popped["close_reason"] = "TAKE_PROFIT"
+            if confirmed_reason:
+                # Tier 1: definitive proof from Binance's own order record.
+                popped["close_price"] = confirmed_price
+                popped["close_reason"] = confirmed_reason
             else:
-                popped["close_reason"] = "MANUAL_CLOSE"
+                # Tier 2 (fallback): price-proximity heuristic against the
+                # last-known price and stored SL/TP levels.
+                popped["close_price"] = popped.get("current_price", popped.get("entry_price"))
+                close_price = popped["close_price"]
+                stop_loss = popped.get("stop_loss")
+                take_profit = popped.get("take_profit")
+                near_sl = stop_loss and close_price > 0 and abs(close_price - stop_loss) / close_price <= 0.01
+                near_tp = take_profit and close_price > 0 and abs(close_price - take_profit) / close_price <= 0.01
+                if near_sl:
+                    popped["close_reason"] = "STOP_LOSS"
+                elif near_tp:
+                    popped["close_reason"] = "TAKE_PROFIT"
+                else:
+                    # Tier 3 (final fallback): nothing on Binance's records
+                    # or in the proximity check points to an automatic
+                    # trigger - only now call it a manual close.
+                    popped["close_reason"] = "MANUAL_CLOSE"
 
             # Same fee-adjusted pnl_percent calculation _close_trade() uses,
             # so this trade's win/loss classification and displayed % is
