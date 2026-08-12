@@ -345,6 +345,21 @@ class BinanceFuturesClient:
             params["origClientOrderId"] = origClientOrderId
         return self._get("/fapi/v1/order", params)
 
+    def query_algo_order(self, symbol: str, algo_id: int) -> dict:
+        """
+        ADDED (user request, definitive auto-vs-manual close detection):
+        GET /fapi/v1/algoOrder - checks a SPECIFIC conditional (algo)
+        order's status by algoId, the same "orderId" new_stop_order()
+        returns and trade["sl_order_id"]/["tp_order_id"] already store.
+        Response includes "actualPrice" - per Binance's own docs, this is
+        only ever populated once the order has actually been TRIGGERED
+        and FILLED in the matching engine (stays "0.00000" otherwise,
+        e.g. if still resting or cancelled unfilled) - so a non-zero
+        actualPrice here is definitive, first-party proof the SL/TP order
+        genuinely filled, not a guess based on price proximity.
+        """
+        return self._get("/fapi/v1/algoOrder", {"symbol": symbol, "algoId": algo_id})
+
     def cancel_order(self, symbol: str, orderId: int = None) -> dict:
         """
         FIX (Binance Algo Order migration): this is only ever called (from
