@@ -25,7 +25,7 @@ RISK_PER_TRADE = 0.02  # 2% risk per trade (for position sizing)
 # ============================================================
 # SIGNAL REQUIREMENTS (à¶”à¶¶à·š à¶…à¶½à·”à¶­à·Š conditions)
 # ============================================================
-MIN_TOOLS_MATCH = 3  # Tools 5à¶±à·Š à¶…à·€à¶¸ à¶œà·à¶½à¶´à·™à¶± à¶œà¶«à¶± (5/3 rule)
+MIN_TOOLS_MATCH = 4  # Tools 5à¶±à·Š à¶…à·€à¶¸ à¶œà·à¶½à¶´à·™à¶± à¶œà¶«à¶± (5/3 rule)
 MIN_SUBCONCEPTS_PER_TOOL = 1  # FIX (user request, reverted from 2): each of
 # the 5 tools has many of its own named sub-concepts internally (Tool 1
 # alone has 9+: BOS, CHoCH, MSS, SMT Divergence, Macro Break, Unicorn Model,
@@ -102,7 +102,7 @@ TELEGRAM_ADMIN_CHAT_ID = "8804792847"  # ONLY this chat's commands/button-taps
 # different Telegram account/chat.
 SETTINGS_OVERRIDE_FILE = "settings_override.json"  # where Telegram-toggled
 # settings (and pause state) are saved, so they survive a bot/VPS restart.
-MIN_PROFIT_CHANCE = 40.0  # FIX: calibration_table.json (27,042 real backtested
+MIN_PROFIT_CHANCE = 35.0  # FIX: calibration_table.json (27,042 real backtested
 # setups) shows NO score bucket ever reaches 65% real win-rate — the
 # highest bucket (90-100 raw score) only wins 51.7% of the time. Since
 # analysis_engine._get_calibrated_profit_chance() replaces the raw score
