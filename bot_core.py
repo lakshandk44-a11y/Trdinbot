@@ -1234,6 +1234,19 @@ class HackerAIBot:
                             f"BEFORE any exchange action (no leverage change, no order placed).")
             return
 
+        # ADDED (user request): daily realized-loss limit - checked here
+        # for the exact same reason and at the exact same point as
+        # MAX_OPEN_TRADES right above (before ANY exchange action, so a
+        # blocked attempt is a true no-op - no leverage change, no order
+        # placed). Covers BOTH entry paths automatically since both the
+        # tool-vote path and _try_pattern_engine_entry's fallback path
+        # both call this same _execute_trade() function. Never affects
+        # managing/closing an ALREADY-open trade - only blocks new entries.
+        if self.trade_manager.is_daily_loss_limit_reached():
+            logger.warning(f"🛑 Daily loss limit reached (${self.trade_manager.daily_loss_usdt:.2f} "
+                            f"lost today). Skipping {symbol} - no new trades until tomorrow.")
+            return
+
         # Get coin-specific exchange info
         coin_min_notional = 10.0
         coin_max_leverage = 20
