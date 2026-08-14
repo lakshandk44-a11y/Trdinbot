@@ -62,6 +62,17 @@ class TradeManager:
         # they kept existing on the exchange, unmanaged. State is now saved
         # to disk on every change and reloaded here on startup.
         self.state_file = self.config.get("TRADE_STATE_FILE", "trade_state.json")
+
+        # ADDED (user request): daily realized-loss limit tracking. Purely
+        # local bookkeeping - accumulates $ losses at trade-CLOSE time
+        # (never counts unrealized/open-position PnL), resets at the next
+        # calendar day, and survives restarts via the SAME state file
+        # already used for open_trades/trade_history (see _save_state/
+        # _load_state below) - no new files, no new API calls of its own.
+        self.daily_loss_usdt = 0.0
+        self.daily_loss_date = None
+        self._daily_loss_alert_sent_date = None
+
         self._load_state()
 
         # FIX (TP1 -> TP2 continuation): optional callback, wired up by
@@ -144,7 +155,11 @@ class TradeManager:
             with self.lock:
                 data = {
                     "open_trades": {s: self._serialize_trade(t) for s, t in self.open_trades.items()},
-                    "trade_history": [self._serialize_trade(t) for t in self.trade_history[-200:]]
+                    "trade_history": [self._serialize_trade(t) for t in self.trade_history[-200:]],
+                    # ADDED (user request): persisted so a restart mid-day
+                    # doesn't lose track of today's accumulated realized loss.
+                    "daily_loss_usdt": self.daily_loss_usdt,
+                    "daily_loss_date": self.daily_loss_date,
                 }
             tmp_path = f"{self.state_file}.tmp"
             with open(tmp_path, "w") as f:
@@ -165,11 +180,106 @@ class TradeManager:
             with self.lock:
                 self.open_trades = {s: self._deserialize_trade(t) for s, t in loaded_open.items()}
                 self.trade_history = [self._deserialize_trade(t) for t in loaded_history]
+                # ADDED (user request): restore today's accumulated
+                # realized loss - _check_daily_loss_reset() (called before
+                # every use) still correctly zeroes this out if the loaded
+                # date is not today, so a restart on a NEW day behaves
+                # exactly like a fresh day regardless of what was saved.
+                self.daily_loss_usdt = float(data.get("daily_loss_usdt", 0.0) or 0.0)
+                self.daily_loss_date = data.get("daily_loss_date")
             if self.open_trades:
                 logger.info(f"♻️ Restored {len(self.open_trades)} open trade(s) from "
                             f"{self.state_file}: {list(self.open_trades.keys())}")
         except Exception as e:
             logger.error(f"⚠️ Failed to load trade state from {self.state_file}: {e}")
+
+    def _check_daily_loss_reset(self):
+        """
+        ADDED (user request): rolls daily_loss_usdt over to 0 the moment
+        the calendar day changes (server/VPS local date, same time
+        reference every other timestamp in this file already uses -
+        entry_time/close_time are plain datetime.now()). Called before
+        every read AND every write of daily_loss_usdt, so the day boundary
+        is always correctly handled whether or not any trade happened to
+        close right at midnight, and whether or not the bot was restarted
+        in between.
+        """
+        today = datetime.now().date().isoformat()
+        if self.daily_loss_date != today:
+            self.daily_loss_date = today
+            self.daily_loss_usdt = 0.0
+            self._daily_loss_alert_sent_date = None
+
+    def record_realized_loss(self, trade: Dict):
+        """
+        ADDED (user request): call once, right after a trade's FINAL
+        pnl_percent is known, from either close path (_close_trade for a
+        normal SL/TP/pattern-cooldown close, _handle_externally_closed_
+        trade for a manual/auto-detected-late close) - never from
+        anywhere that touches an open/still-running trade's unrealized
+        PnL, so only genuinely CLOSED, REALIZED losses ever count toward
+        the daily limit, exactly as requested.
+
+        Deliberately computes the $ loss from this trade's own already-
+        known fields (pnl_percent x margin, where margin = quantity x
+        entry_price / leverage) instead of making a fresh Binance API
+        call here - this keeps the feature from adding ANY extra request
+        volume on top of what the bot already does per trade, and works
+        identically regardless of whether Telegram/real_pnl_usdt fetching
+        is configured or available.
+        """
+        self._check_daily_loss_reset()
+        pnl_percent = trade.get("pnl_percent")
+        if pnl_percent is None or pnl_percent >= 0:
+            return  # only realized LOSSES count
+
+        try:
+            quantity = float(trade.get("quantity", 0) or 0)
+            entry_price = float(trade.get("entry_price", 0) or 0)
+            leverage = float(trade.get("leverage", 1) or 1)
+            if leverage <= 0:
+                leverage = 1
+            margin = (quantity * entry_price) / leverage
+            loss_usdt = abs(pnl_percent) / 100.0 * margin
+        except (TypeError, ValueError, ZeroDivisionError):
+            return
+
+        self.daily_loss_usdt += loss_usdt
+        self._save_state()
+
+        limit = self.config.get("DAILY_LOSS_LIMIT_USDT", 20.0)
+        enabled = self.config.get("DAILY_LOSS_LIMIT_ENABLED", True)
+        if (enabled and self.daily_loss_usdt >= limit
+                and self._daily_loss_alert_sent_date != self.daily_loss_date):
+            self._daily_loss_alert_sent_date = self.daily_loss_date
+            logger.warning(f"🛑 Daily loss limit reached: ${self.daily_loss_usdt:.2f} lost today "
+                            f"(limit ${limit:.2f}) - new trades paused until the next day.")
+            if _TELEGRAM_AVAILABLE:
+                try:
+                    send_telegram(
+                        f"🛑 *Daily Loss Limit Reached*\n"
+                        f"Lost today: ${self.daily_loss_usdt:.2f} (limit: ${limit:.2f})\n"
+                        f"Bot will not open new trades for the rest of today.\n"
+                        f"Already-open trades keep being managed normally."
+                    )
+                except Exception as e:
+                    logger.warning(f"Telegram notify (daily loss limit) failed: {e}")
+
+    def is_daily_loss_limit_reached(self) -> bool:
+        """
+        ADDED (user request): the single check bot_core calls before
+        opening ANY new trade (both the tool-vote path and the pattern-
+        engine fallback path both call this same method, so neither can
+        bypass the limit). Returns False whenever the feature is
+        disabled via its Telegram toggle - existing behavior (no limit at
+        all) is fully preserved when off. Never blocks managing/closing
+        an ALREADY-open trade - only new entries.
+        """
+        self._check_daily_loss_reset()
+        if not self.config.get("DAILY_LOSS_LIMIT_ENABLED", True):
+            return False
+        limit = self.config.get("DAILY_LOSS_LIMIT_USDT", 20.0)
+        return self.daily_loss_usdt >= limit
 
     def reconcile_with_exchange(self):
         """
@@ -848,6 +958,12 @@ class TradeManager:
 
             self.trade_history.append(popped)
 
+        # ADDED (user request): daily realized-loss tracking - only ever
+        # adds to the total when pnl_percent is actually negative (see
+        # record_realized_loss docstring). Called outside the lock above
+        # since it does its own locking internally via _save_state().
+        self.record_realized_loss(popped)
+
         self._save_state()
 
         if _TELEGRAM_AVAILABLE:
@@ -1184,6 +1300,11 @@ class TradeManager:
             trade["fee_cost_percent"] = fee_cost_percent
 
             self.trade_history.append(trade)
+
+        # ADDED (user request): daily realized-loss tracking - see
+        # record_realized_loss docstring. Called right after pnl_percent
+        # is finalized above, exactly like the external-close path.
+        self.record_realized_loss(trade)
 
         duration = (datetime.now() - trade["entry_time"]).seconds
         result_word = "PROFIT" if trade["pnl_percent"] > 0 else "LOSS"
