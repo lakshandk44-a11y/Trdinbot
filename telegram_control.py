@@ -52,6 +52,12 @@ TOGGLE_DEFINITIONS = [
     {"code": "PATTERN", "config_key": "PATTERN_ENGINE_ENABLED",     "label": "Pattern Engine (Phase 1)"},
     # ADDED (user request): Volume Profile + Funding Rate confluence.
     {"code": "FUNDING", "config_key": "FUNDING_RATE_ENABLED",       "label": "Funding Rate Confluence"},
+    # ADDED (user request): ON = daily realized-loss limit enforced (new
+    # trades pause once today's losses hit DAILY_LOSS_LIMIT_USDT), OFF =
+    # no limit at all (old behavior). Toggling OFF does not clear the
+    # accumulated total - just stops it from blocking new trades - so
+    # turning it back ON later same-day resumes with today's real total.
+    {"code": "DAILYLOSS", "config_key": "DAILY_LOSS_LIMIT_ENABLED",  "label": "Daily Loss Limit Guard"},
     # ADDED (user request): ON = Isolated margin, OFF = Cross margin.
     # Bot reads this exact config key (bot_core._execute_trade) right
     # before opening every new trade and sets the symbol's margin mode on
@@ -155,8 +161,21 @@ class TelegramController:
         return "▶️ Resume Bot" if self.bot.paused else "⏸️ Pause Bot"
 
     def _build_menu_keyboard(self) -> Dict:
-        rows = [[{"text": self._toggle_button_text(tog), "callback_data": f"t:{tog['code']}"}]
-                for tog in TOGGLE_DEFINITIONS]
+        """
+        FIX (user request, pure layout/visual change): the toggle buttons
+        used to be one full-width row each - a long vertical stack. Now
+        arranged in a tidy 2-per-row grid instead. This is ONLY a visual
+        reflow: the exact same buttons, same text (self._toggle_button_
+        text - unchanged), same callback_data (f"t:{tog['code']}" -
+        unchanged) in the exact same TOGGLE_DEFINITIONS order, just grouped
+        2-to-a-row instead of 1-to-a-row. Nothing about what a button does
+        or which config_key it flips changes at all. PAUSE and Status stay
+        their own full-width rows at the bottom, same as before, since
+        those are the two primary controls.
+        """
+        toggle_buttons = [{"text": self._toggle_button_text(tog), "callback_data": f"t:{tog['code']}"}
+                           for tog in TOGGLE_DEFINITIONS]
+        rows = [toggle_buttons[i:i + 2] for i in range(0, len(toggle_buttons), 2)]
         rows.append([{"text": self._pause_button_text(), "callback_data": "t:PAUSE"}])
         rows.append([{"text": "📊 Status", "callback_data": "status"}])
         return {"inline_keyboard": rows}
