@@ -102,7 +102,7 @@ TELEGRAM_ADMIN_CHAT_ID = "8804792847"  # ONLY this chat's commands/button-taps
 # different Telegram account/chat.
 SETTINGS_OVERRIDE_FILE = "settings_override.json"  # where Telegram-toggled
 # settings (and pause state) are saved, so they survive a bot/VPS restart.
-MIN_PROFIT_CHANCE = 35.0  # FIX: calibration_table.json (27,042 real backtested
+MIN_PROFIT_CHANCE = 50.0  # FIX: calibration_table.json (27,042 real backtested
 # setups) shows NO score bucket ever reaches 65% real win-rate — the
 # highest bucket (90-100 raw score) only wins 51.7% of the time. Since
 # analysis_engine._get_calibrated_profit_chance() replaces the raw score
@@ -202,6 +202,16 @@ SMT_DIVERGENCE_ENABLED = True   # fetch a correlated symbol's candles for SMT Di
 # check (see AnalysisEngine._calculate_profit_chance) - purely additive,
 # same pattern as SMT_DIVERGENCE_ENABLED above. Set False to disable.
 FUNDING_RATE_ENABLED = True
+
+# ADDED (user request): daily realized-loss limit. Purely local, no extra
+# API calls - see TradeManager.record_realized_loss/is_daily_loss_limit_
+# reached in trade_manager.py. Resets automatically at the next calendar
+# day, survives bot restarts (persisted in trade_state.json), and only
+# ever counts realized losses from trades that actually CLOSED - never an
+# open/still-running trade's unrealized PnL. Toggle from Telegram /menu.
+DAILY_LOSS_LIMIT_ENABLED = True
+DAILY_LOSS_LIMIT_USDT = 20.0   # change this $ amount to whatever fits your account size
+
 SMT_CORRELATED_MAP = {}         # optional per-symbol override, e.g. {"SOLUSDT": "ETHUSDT"} - falls back to BTCUSDT (or ETHUSDT when scanning BTCUSDT itself) when a symbol isn't listed
 DAILY_HISTORY_CANDLES = 200     # ~6.5 months of daily candles fetched per symbol for Macro Structure (PDH/PDL/PWH/PWL) and Old Highs/Lows
 OLD_HIGH_LOW_MIN_DAYS = 30      # an "old" swing high/low must be at least this many days back
