@@ -324,8 +324,36 @@ class TradeManager:
                     trade["close_price"] = trade.get("current_price", trade.get("entry_price"))
                     trade["close_reason"] = "RECONCILED_CLOSED_EXTERNALLY"
                     trade["status"] = "CLOSED"
+
+                    # ADDED (user request): this startup-only path never
+                    # computed pnl_percent at all before, so a trade that
+                    # closed while the bot was offline could never count
+                    # toward the daily loss limit (record_realized_loss
+                    # requires pnl_percent to already be set - see its
+                    # docstring). Same fee-adjusted formula _close_trade()
+                    # and _handle_externally_closed_trade() already use,
+                    # so this rare path is now consistent with those two.
+                    try:
+                        if trade["side"] == "BUY":
+                            final_pnl = (trade["close_price"] - trade["entry_price"]) / trade["entry_price"]
+                        else:
+                            final_pnl = (trade["entry_price"] - trade["close_price"]) / trade["entry_price"]
+                        leverage = trade.get("leverage", 1)
+                        gross_pnl_percent = final_pnl * 100 * leverage
+                        fee_percent_per_side = self.config.get("TRADING_FEE_PERCENT", 0.05)
+                        fee_cost_percent = 2 * fee_percent_per_side * leverage
+                        trade["pnl_percent_gross"] = gross_pnl_percent
+                        trade["pnl_percent"] = gross_pnl_percent - fee_cost_percent
+                        trade["fee_cost_percent"] = fee_cost_percent
+                    except (TypeError, ValueError, ZeroDivisionError) as e:
+                        logger.warning(f"{symbol}: could not compute pnl_percent during "
+                                        f"reconciliation ({e}) - daily loss won't include this trade.")
+
                     with self.lock:
                         self.trade_history.append(trade)
+
+                    if "pnl_percent" in trade:
+                        self.record_realized_loss(trade)
 
         # Real exchange positions with no local record at all
         for symbol, pos in real_open.items():
