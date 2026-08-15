@@ -1496,6 +1496,63 @@ class HackerAIBot:
                 logger.warning(f"{symbol}: could not parse actual fill price/qty from order "
                                 f"response ({e}) - using pre-order estimates instead.")
 
+            # FIX (user request, full fix - not just a warning): SL/TP
+            # were originally SELECTED using current_price (the pre-order
+            # estimate) because calculate_position_size() above genuinely
+            # needs a concrete SL price to size the quantity BEFORE this
+            # order can be placed - that ordering constraint is real and
+            # can't change without restructuring how quantity itself gets
+            # decided (a much bigger, riskier change the user did not ask
+            # for). BUT the quantity is now already fixed regardless (the
+            # order is filled) - so the TP/SL levels actually recorded
+            # for and used to protect this trade CAN be safely refreshed
+            # here to reflect the true fill price, at zero cost to
+            # anything already decided. Re-runs the exact same candidate
+            # selection (ATR-scaling, Confluence Stacking, R:R-aware TP -
+            # unchanged) with actual_entry_price as the entry anchor
+            # instead of the pre-fill current_price. In the overwhelming
+            # majority of trades (slippage far too small to change which
+            # candidates even qualify) this reproduces the exact same
+            # levels already chosen - only in a genuine slippage edge
+            # case does anything actually differ, and only for the
+            # better (levels correctly anchored to the real entry).
+            # Falls back to the original pre-fill levels if analysis
+            # isn't available or the recompute finds nothing (identical
+            # to how the very first computation already falls back) -
+            # this can only ever refine the chosen levels, never fail the
+            # trade or block it from opening.
+            if pattern_override:
+                pass  # pattern-derived TP/SL is a fixed measured-move target, not re-derived from live analysis - nothing to refresh
+            elif analysis:
+                refreshed_tp, refreshed_sl = self._get_analysis_based_tp_sl(
+                    symbol, decision, actual_entry_price, analysis
+                )
+                if refreshed_tp is not None:
+                    dynamic_tp = refreshed_tp
+                if refreshed_sl is not None:
+                    dynamic_sl = refreshed_sl
+                    sl_price = refreshed_sl
+                elif dynamic_sl is None:
+                    # No analysis-based SL before OR after refresh - keep
+                    # the same fixed-percent fallback already computed
+                    # above, just anchored to the real entry price now.
+                    sl_price = (actual_entry_price * (1 - sl_percent) if decision == "BUY"
+                                else actual_entry_price * (1 + sl_percent))
+
+            # Safety net: if the (possibly just-refreshed) SL still ends
+            # up on the wrong side of the real fill price - only possible
+            # now from genuinely extreme slippage, not from stale-price
+            # selection anymore - surface that loudly rather than let a
+            # trade silently open with an already-breached stop.
+            if side == "BUY" and sl_price is not None and actual_entry_price <= sl_price:
+                logger.warning(f"⚠️ {symbol}: actual fill price ({actual_entry_price:.8f}) is at/past "
+                                f"the selected stop_loss ({sl_price:.8f}) - this trade's SL may "
+                                f"trigger almost immediately.")
+            elif side == "SELL" and sl_price is not None and actual_entry_price >= sl_price:
+                logger.warning(f"⚠️ {symbol}: actual fill price ({actual_entry_price:.8f}) is at/past "
+                                f"the selected stop_loss ({sl_price:.8f}) - this trade's SL may "
+                                f"trigger almost immediately.")
+
             # FIX (trailing stop redesign): capture ATR(14) at entry so the
             # trailing stop distance can adapt to THIS coin's actual
             # volatility instead of using one fixed % for all scanned coins
