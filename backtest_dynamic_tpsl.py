@@ -87,13 +87,20 @@ def get_dynamic_tp_sl(side: str, entry_price: float, analysis: Dict) -> Tuple[Op
          >= 1:1 reward:risk against the chosen SL, falling back to the
          pool's absolute strongest candidate (the old behavior) only when
          no candidate clears that bar. SL selection is unchanged.
-    This function had fallen out of sync with that change before (see the
-    two FIX comments still further down for the earlier drift) - updated
-    here verbatim to match, so this backtest keeps measuring what the live
-    bot actually does today, not an older version of it.
+    FIX (sync with live bot, THIS round - user requested a full re-check):
+    the live bot's TP/SL selection was extended again since this mirror
+    was last updated - Confluence Stacking was added: nearby candidate
+    levels (within one ATR of each other) now get merged into a single
+    combined candidate whose strength is the SUM of its members, before
+    the strongest-candidate/R:R selection below runs (same "Unicorn
+    Model" multi-confirmation concept Tool 1 already uses for entries,
+    now applied to level selection too - see bot_core._cluster_candidates
+    for the exact logic, replicated verbatim here via the standalone
+    _cluster_candidates() function below).
     """
     resistance_candidates = []  # list of (level, strength)
     support_candidates = []
+    atr_basis = entry_price * 0.005  # fallback if the loop below never sets it
 
     for tf_name in ["higher", "medium"]:
         tf = analysis.get(tf_name)
@@ -169,6 +176,10 @@ def get_dynamic_tp_sl(side: str, entry_price: float, analysis: Dict) -> Tuple[Op
         if va_low is not None and va_low < entry_price:
             support_candidates.append((va_low, atr_basis * 1.6))
 
+    # ADDED (sync with live bot): Confluence Stacking - see docstring above.
+    resistance_candidates = _cluster_candidates(resistance_candidates, atr_basis)
+    support_candidates = _cluster_candidates(support_candidates, atr_basis)
+
     if side == "BUY":
         tp_pool = [(lvl, s) for lvl, s in resistance_candidates if lvl > entry_price]
         sl_pool = [(lvl, s) for lvl, s in support_candidates if lvl < entry_price]
@@ -204,6 +215,38 @@ def _pick_tp_with_rr(tp_pool: List[Tuple[float, float]], entry_price: float,
         return max(qualifying, key=lambda x: x[1])[0]
 
     return strongest
+
+
+def _cluster_candidates(candidates: List[Tuple[float, float]],
+                         cluster_distance: float) -> List[Tuple[float, float]]:
+    """
+    Standalone mirror of bot_core.HackerAIBot._cluster_candidates() - see
+    that method's docstring for the full reasoning (Confluence Stacking).
+    Groups candidate levels within `cluster_distance` of each other into a
+    single combined candidate - its strength is the SUM of every member's
+    strength, its level is their strength-weighted average.
+    """
+    if not candidates:
+        return []
+
+    sorted_candidates = sorted(candidates, key=lambda x: x[0])
+    clusters = [[sorted_candidates[0]]]
+    for lvl, strength in sorted_candidates[1:]:
+        if lvl - clusters[-1][-1][0] <= cluster_distance:
+            clusters[-1].append((lvl, strength))
+        else:
+            clusters.append([(lvl, strength)])
+
+    merged = []
+    for cluster in clusters:
+        total_strength = sum(s for _, s in cluster)
+        if total_strength > 0:
+            weighted_level = sum(lvl * s for lvl, s in cluster) / total_strength
+        else:
+            weighted_level = cluster[0][0]
+        merged.append((weighted_level, total_strength))
+
+    return merged
 
 
 def simulate_outcome_at_prices(lower_df: pd.DataFrame, entry_idx: int, direction: str,
