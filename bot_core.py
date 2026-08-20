@@ -1247,6 +1247,18 @@ class HackerAIBot:
                             f"lost today). Skipping {symbol} - no new trades until tomorrow.")
             return
 
+        # ADDED: Smart Hours Guard — skip entry if this hour has a
+        # historically high weighted loss rate across the last 30 days.
+        # Checked here before ANY exchange action (no order, no leverage
+        # change). Open trades are never affected — new entries only.
+        if self.trade_manager.is_smart_hours_blocked():
+            logger.info(
+                f"📊 Smart Hours Guard: skipping {symbol} — "
+                f"current hour historically bad. "
+                f"[{self.trade_manager.get_smart_hours_status_text()}]"
+            )
+            return
+
         # Get coin-specific exchange info
         coin_min_notional = 10.0
         coin_max_leverage = 20
