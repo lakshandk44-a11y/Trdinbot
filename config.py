@@ -212,6 +212,41 @@ FUNDING_RATE_ENABLED = True
 DAILY_LOSS_LIMIT_ENABLED = True
 DAILY_LOSS_LIMIT_USDT = 20.0   # change this $ amount to whatever fits your account size
 
+# ============================================================
+# SMART HOURS GUARD  —  auto-learn & block historically bad hours
+# ============================================================
+# Reads the last LOOKBACK_DAYS of closed trade history, groups trades
+# by the HOUR they were ENTERED, and blocks new entries during hours
+# that have a consistently high weighted loss rate.
+#
+# Three conditions must ALL be met before an hour is blocked:
+#   1. At least MIN_SAMPLES trades entered during that hour
+#   2. Weighted loss rate >= LOSS_RATE_THRESHOLD
+#        (recent trades count more — linear recency decay)
+#   3. Losses spread across at least MIN_SPREAD_DAYS different
+#        calendar days  ← prevents one bad day from blocking an hour
+#
+# Re-analysis runs at startup and every REANALYZE_DAYS days.
+# State (bad hours list + schedule) persists in trade_state.json.
+# Toggle ON/OFF live from Telegram /menu — no restart needed.
+# Never blocks more than 12 hours total (sanity cap).
+# Never touches open trades — only gates NEW entries.
+#
+# TUNING:
+#   LOOKBACK_DAYS 30     → analyse last 30 days of history
+#   REANALYZE_DAYS 3     → rebuild list every 3 days
+#   MIN_TOTAL_TRADES 20  → need 20+ closed trades before blocking anything
+#   MIN_SAMPLES 4        → need 4+ trades per hour to classify it
+#   MIN_SPREAD_DAYS 2    → losses must appear on 2+ different calendar days
+#   LOSS_RATE_THRESHOLD  → 0.70 = 70% weighted loss rate required to block
+SMART_HOURS_GUARD_ENABLED        = True
+SMART_HOURS_LOOKBACK_DAYS        = 30     # days of history to analyse
+SMART_HOURS_REANALYZE_DAYS       = 3      # how often to rebuild the bad-hours list
+SMART_HOURS_MIN_TOTAL_TRADES     = 20     # minimum total recent trades before any blocking
+SMART_HOURS_MIN_SAMPLES          = 4      # minimum trades per hour to classify it
+SMART_HOURS_MIN_SPREAD_DAYS      = 2      # losses must span this many different calendar days
+SMART_HOURS_LOSS_RATE_THRESHOLD  = 0.70   # weighted loss rate threshold (0.70 = 70 %)
+
 SMT_CORRELATED_MAP = {}         # optional per-symbol override, e.g. {"SOLUSDT": "ETHUSDT"} - falls back to BTCUSDT (or ETHUSDT when scanning BTCUSDT itself) when a symbol isn't listed
 DAILY_HISTORY_CANDLES = 200     # ~6.5 months of daily candles fetched per symbol for Macro Structure (PDH/PDL/PWH/PWL) and Old Highs/Lows
 OLD_HIGH_LOW_MIN_DAYS = 30      # an "old" swing high/low must be at least this many days back
