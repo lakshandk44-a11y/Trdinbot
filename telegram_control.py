@@ -63,7 +63,10 @@ TOGGLE_DEFINITIONS = [
     # before opening every new trade and sets the symbol's margin mode on
     # Binance to match, whichever is toggled ON here at that moment.
     # Nothing else about how/when a trade opens changes either way.
-    {"code": "ISOMGN", "config_key": "USE_ISOLATED_MARGIN",         "label": "Isolated Margin (OFF = Cross)"},
+    {"code": "ISOMGN",    "config_key": "USE_ISOLATED_MARGIN",          "label": "Isolated Margin (OFF = Cross)"},
+    # ADDED: Smart Hours Guard — learns from last 30 days of trade history
+    # which hours have high loss rates and blocks new entries during them.
+    {"code": "SMTHOURS", "config_key": "SMART_HOURS_GUARD_ENABLED",    "label": "Smart Hours Guard"},
 ]
 
 
@@ -213,12 +216,21 @@ class TelegramController:
 
         toggles_text = "\n".join(f"  {self._toggle_button_text(tog)}" for tog in TOGGLE_DEFINITIONS)
 
+        # ADDED: Smart Hours Guard live status line
+        smart_hours_line = ""
+        try:
+            sh = self.bot.trade_manager.get_smart_hours_status_text()
+            smart_hours_line = f"\n📊 Smart Hours: {sh}"
+        except Exception:
+            pass
+
         return (
             f"🎛️ *Bot Status*\n"
             f"Status: {state}\n"
             f"{balance_line}"
             f"Open trades ({len(open_trades)}):\n{trade_lines}\n\n"
             f"Settings:\n{toggles_text}"
+            f"{smart_hours_line}"
         )
 
     def _build_rate_text(self) -> str:
