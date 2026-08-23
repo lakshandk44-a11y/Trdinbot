@@ -212,41 +212,6 @@ FUNDING_RATE_ENABLED = True
 DAILY_LOSS_LIMIT_ENABLED = True
 DAILY_LOSS_LIMIT_USDT = 20.0   # change this $ amount to whatever fits your account size
 
-# ============================================================
-# SMART HOURS GUARD  —  auto-learn & block historically bad hours
-# ============================================================
-# Reads the last LOOKBACK_DAYS of closed trade history, groups trades
-# by the HOUR they were ENTERED, and blocks new entries during hours
-# that have a consistently high weighted loss rate.
-#
-# Three conditions must ALL be met before an hour is blocked:
-#   1. At least MIN_SAMPLES trades entered during that hour
-#   2. Weighted loss rate >= LOSS_RATE_THRESHOLD
-#        (recent trades count more — linear recency decay)
-#   3. Losses spread across at least MIN_SPREAD_DAYS different
-#        calendar days  ← prevents one bad day from blocking an hour
-#
-# Re-analysis runs at startup and every REANALYZE_DAYS days.
-# State (bad hours list + schedule) persists in trade_state.json.
-# Toggle ON/OFF live from Telegram /menu — no restart needed.
-# Never blocks more than 12 hours total (sanity cap).
-# Never touches open trades — only gates NEW entries.
-#
-# TUNING:
-#   LOOKBACK_DAYS 30     → analyse last 30 days of history
-#   REANALYZE_DAYS 3     → rebuild list every 3 days
-#   MIN_TOTAL_TRADES 20  → need 20+ closed trades before blocking anything
-#   MIN_SAMPLES 4        → need 4+ trades per hour to classify it
-#   MIN_SPREAD_DAYS 2    → losses must appear on 2+ different calendar days
-#   LOSS_RATE_THRESHOLD  → 0.70 = 70% weighted loss rate required to block
-SMART_HOURS_GUARD_ENABLED        = True
-SMART_HOURS_LOOKBACK_DAYS        = 30     # days of history to analyse
-SMART_HOURS_REANALYZE_DAYS       = 3      # how often to rebuild the bad-hours list
-SMART_HOURS_MIN_TOTAL_TRADES     = 20     # minimum total recent trades before any blocking
-SMART_HOURS_MIN_SAMPLES          = 4      # minimum trades per hour to classify it
-SMART_HOURS_MIN_SPREAD_DAYS      = 2      # losses must span this many different calendar days
-SMART_HOURS_LOSS_RATE_THRESHOLD  = 0.70   # weighted loss rate threshold (0.70 = 70 %)
-
 SMT_CORRELATED_MAP = {}         # optional per-symbol override, e.g. {"SOLUSDT": "ETHUSDT"} - falls back to BTCUSDT (or ETHUSDT when scanning BTCUSDT itself) when a symbol isn't listed
 DAILY_HISTORY_CANDLES = 200     # ~6.5 months of daily candles fetched per symbol for Macro Structure (PDH/PDL/PWH/PWL) and Old Highs/Lows
 OLD_HIGH_LOW_MIN_DAYS = 30      # an "old" swing high/low must be at least this many days back
@@ -317,7 +282,35 @@ TRADING_FEE_PERCENT = 0.05     # % per side (Binance default taker fee)
 # STATE PERSISTENCE (FIX: survive bot/VPS restarts without losing
 # track of open positions and their SL/TP levels)
 # ============================================================
-TRADE_STATE_FILE = os.getenv("TRADE_STATE_FILE", "trade_state.json")
+# BUG FIX (user-reported, confirmed via screenshots): TRADE_STATE_FILE
+# previously defaulted to the bare relative filename "trade_state.json".
+# A relative path resolves against the process's CURRENT WORKING
+# DIRECTORY at the moment it's opened - which is NOT guaranteed to be
+# the same directory every time PM2 (auto-restart-on-crash) or a VPS
+# reboot relaunches the bot, unless cwd is explicitly pinned everywhere
+# it's started from. When a restart happened to launch from a different
+# working directory, _load_state() would look for the file in the WRONG
+# place, find nothing (os.path.exists() -> False), and silently start
+# fresh - meaning today's already-accumulated daily_loss_usdt (and the
+# fact the $ limit had already been reached) was lost, letting new
+# trades open again on the SAME calendar day the limit was supposed to
+# still be blocking. This is very likely what happened around the
+# restart window in the reported incident (limit correctly reached and
+# enforced at 02:24, confirmed still ON via /status at 10:01, then a new
+# trade opened at 10:15 - consistent with a restart landing in that
+# 14-minute gap from a different working directory).
+#
+# Fix: default to an ABSOLUTE path derived from THIS config.py file's
+# own directory (the bot's install directory - a fixed, stable location
+# regardless of whatever directory the process happens to be launched
+# from). This makes state-file location 100% independent of cwd, so
+# every restart - regardless of how or from where it's triggered -
+# reliably finds the exact same file. An explicit TRADE_STATE_FILE
+# environment variable (absolute or relative, if someone specifically
+# wants that) still overrides this default exactly as before - nothing
+# changes for anyone already setting it explicitly.
+_BOT_INSTALL_DIR = os.path.dirname(os.path.abspath(__file__))
+TRADE_STATE_FILE = os.getenv("TRADE_STATE_FILE", os.path.join(_BOT_INSTALL_DIR, "trade_state.json"))
 
 # ============================================================
 # LOGGING
