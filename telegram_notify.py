@@ -29,6 +29,7 @@ Setup:
 
 import logging
 import os
+import time
 import requests
 
 logger = logging.getLogger("telegram_notify")
@@ -38,22 +39,83 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 TIMEOUT_SECONDS = 5  # never let a slow notify stall the bot
 
 
-def send_telegram(message: str):
-    """Best-effort Telegram notification. Always safe to call - never raises."""
+def send_telegram(message: str, max_attempts: int = 3, retry_delay_seconds: float = 1.0):
+    """
+    Best-effort Telegram notification. Always safe to call - never raises.
+
+    FIX (user-reported): a single transient network/API hiccup used to
+    silently drop the notification entirely - one attempt, and ANY
+    failure (network error, timeout, Telegram-side outage) just logged a
+    warning server-side and returned, with no retry. This meant the
+    bot's own internal state could be 100% correct (e.g. a trade
+    genuinely closed and its $ loss correctly recorded toward the daily
+    limit) while the corresponding Telegram message never arrived - from
+    the outside, this looked exactly like a "missing" trade with no way
+    to tell the accounting was actually fine.
+
+    Now retries up to max_attempts times, with a short (1s default)
+    delay between attempts, before giving up - short enough that the
+    very next scan cycle isn't meaningfully delayed even in the rare
+    worst case, since almost all real transient failures (a dropped
+    connection, a brief Telegram-side 5xx, a rate-limit 429) clear up
+    within 1-2 seconds, not the full 5s connect timeout.
+
+    A genuinely malformed request (any other 4xx, e.g. a bad chat_id or
+    unparseable Markdown) is NOT retried - sending the exact same
+    message again would just fail identically every time, so those fail
+    immediately after the first attempt instead of wasting the retry
+    budget on an error retrying can never fix.
+
+    Nothing about the call signature callers already use changes -
+    send_telegram(message) still works exactly as before; max_attempts/
+    retry_delay_seconds are optional and only need to be touched by a
+    caller that wants to override the defaults.
+    """
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         logger.warning("Telegram notify skipped - TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID not set.")
         return
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        resp = requests.post(
-            url,
-            data={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"},
-            timeout=TIMEOUT_SECONDS,
-        )
-        if resp.status_code != 200:
-            logger.warning(f"Telegram notify failed ({resp.status_code}): {resp.text[:300]}")
-    except Exception as e:
-        logger.warning(f"Telegram notify unavailable: {e}")
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    last_error = "unknown error"
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            resp = requests.post(
+                url,
+                data={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"},
+                timeout=TIMEOUT_SECONDS,
+            )
+
+            if resp.status_code == 200:
+                if attempt > 1:
+                    logger.info(f"Telegram notify succeeded on attempt {attempt}/{max_attempts} "
+                                f"(after {attempt - 1} earlier failure(s)).")
+                return  # success - done
+
+            # A 429 (rate limited) or any 5xx (Telegram-side issue) is
+            # worth retrying - the same request will likely succeed a
+            # moment later. Any OTHER 4xx (400 bad request, 403 blocked,
+            # 404 bad chat_id, etc.) is a permanent problem with THIS
+            # request - retrying it unchanged would just fail again, so
+            # stop immediately instead of burning the retry budget.
+            if 400 <= resp.status_code < 500 and resp.status_code != 429:
+                logger.warning(f"Telegram notify failed permanently ({resp.status_code}) - "
+                                f"not retrying (this error won't clear on retry): "
+                                f"{resp.text[:300]}")
+                return
+
+            last_error = f"HTTP {resp.status_code}: {resp.text[:300]}"
+
+        except Exception as e:
+            last_error = str(e)
+
+        if attempt < max_attempts:
+            logger.warning(f"Telegram notify attempt {attempt}/{max_attempts} failed "
+                            f"({last_error}) - retrying in {retry_delay_seconds:.1f}s...")
+            time.sleep(retry_delay_seconds)
+
+    logger.warning(f"Telegram notify FAILED after {max_attempts} attempts - message NOT "
+                    f"delivered: {last_error}")
 
 
 def _md_safe(text) -> str:
