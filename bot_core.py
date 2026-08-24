@@ -1247,18 +1247,6 @@ class HackerAIBot:
                             f"lost today). Skipping {symbol} - no new trades until tomorrow.")
             return
 
-        # ADDED: Smart Hours Guard — skip entry if this hour has a
-        # historically high weighted loss rate across the last 30 days.
-        # Checked here before ANY exchange action (no order, no leverage
-        # change). Open trades are never affected — new entries only.
-        if self.trade_manager.is_smart_hours_blocked():
-            logger.info(
-                f"📊 Smart Hours Guard: skipping {symbol} — "
-                f"current hour historically bad. "
-                f"[{self.trade_manager.get_smart_hours_status_text()}]"
-            )
-            return
-
         # Get coin-specific exchange info
         coin_min_notional = 10.0
         coin_max_leverage = 20
@@ -1459,6 +1447,44 @@ class HackerAIBot:
 
         if quantity <= 0:
             logger.warning(f"⚠️ Invalid quantity for {symbol}: {quantity}")
+            return
+
+        # FIX (real bug, user-reported: Binance API Error -4164 "Order's
+        # notional must be no smaller than 5"): the EARLIER "TRADE
+        # POSSIBLE!" check above only validates the margin*leverage-based
+        # final_position against coin_min_notional - BEFORE
+        # calculate_position_size()'s risk-based downward cap (scaling
+        # quantity down, never up, whenever the naive margin*leverage
+        # sizing would risk more than RISK_PER_TRADE% of account_balance
+        # on a stop-loss hit) runs. That cap can shrink quantity well
+        # below what was validated - most aggressively on trades with a
+        # wide SL distance (a small account_balance makes this worse
+        # too) - with nothing afterward re-checking the POST-cap,
+        # POST-rounding quantity against the exchange's real minimum
+        # notional. The order actually sent could therefore fall under
+        # Binance's floor and get rejected outright, even though the
+        # pre-check above logged "TRADE POSSIBLE" and a solid-looking
+        # position size just moments earlier.
+        #
+        # Re-validate here, after both the risk-cap AND rounding have
+        # been applied, using the exact same coin_min_notional already
+        # computed above - if the final notional is still short, skip
+        # this trade cleanly with a clear log line instead of sending an
+        # order Binance will only reject. Deliberately does NOT bump
+        # quantity back up to clear the minimum - the risk-cap's whole
+        # purpose is keeping real $ risk within RISK_PER_TRADE, and
+        # forcibly enlarging the order to meet an exchange minimum would
+        # undermine exactly the protection it exists to provide.
+        final_notional = quantity * current_price
+        if final_notional < coin_min_notional:
+            logger.info(
+                f"⏭️ {symbol}: skipping - after the risk-based position-size "
+                f"cap, order notional (${final_notional:.2f}) fell below the "
+                f"exchange minimum (${coin_min_notional:.2f}). This trade's "
+                f"stop-loss distance made the RISK_PER_TRADE-safe quantity "
+                f"too small for this symbol; sending it would only be "
+                f"rejected by Binance."
+            )
             return
 
         # Rate limit
@@ -1958,3 +1984,4 @@ class HackerAIBot:
                             f"Reason: {t.get('close_reason', 'N/A')}")
 
         logger.info(f"═══════════════════════════════════════")
+        
