@@ -22,15 +22,6 @@ try:
 except Exception:
     _TELEGRAM_AVAILABLE = False
 
-# ADDED: Smart Hours Guard — history-driven bad-hour blocker.
-# Fail-safe: if the file is missing the bot runs exactly as before.
-try:
-    from smart_hours_guard import SmartHoursGuard as _SmartHoursGuard
-    _SMART_HOURS_AVAILABLE = True
-except Exception:
-    _SMART_HOURS_AVAILABLE = False
-    _SmartHoursGuard = None  # type: ignore[assignment,misc]
-
 logger = logging.getLogger(__name__)
 
 class TradeManager:
@@ -81,22 +72,6 @@ class TradeManager:
         self.daily_loss_usdt = 0.0
         self.daily_loss_date = None
         self._daily_loss_alert_sent_date = None
-
-        # ADDED: Smart Hours Guard — instantiated before _load_state() so
-        # restore_state() is available when _load_state() runs.
-        if _SMART_HOURS_AVAILABLE and _SmartHoursGuard is not None:
-            self.smart_hours_guard = _SmartHoursGuard(
-                config=config,
-                trade_history_fn=self._get_trade_history_snapshot,
-                alert_callback=self._smart_hours_alert,
-            )
-        else:
-            self.smart_hours_guard = None
-            if not _SMART_HOURS_AVAILABLE:
-                logger.warning(
-                    "⚠️ SmartHoursGuard unavailable "
-                    "(smart_hours_guard.py missing) — bad-hour blocking disabled."
-                )
 
         self._load_state()
 
@@ -180,31 +155,11 @@ class TradeManager:
             with self.lock:
                 data = {
                     "open_trades": {s: self._serialize_trade(t) for s, t in self.open_trades.items()},
-                    # EXTENDED: 200 → 500 to support 30-day lookback for
-                    # SmartHoursGuard (active bot at ~10 trades/day needs
-                    # ~300 records for 30d; 500 gives comfortable headroom).
-                    # File stays well under 1 MB — no disk concern.
-                    "trade_history": [self._serialize_trade(t) for t in self.trade_history[-500:]],
+                    "trade_history": [self._serialize_trade(t) for t in self.trade_history[-200:]],
                     # ADDED (user request): persisted so a restart mid-day
                     # doesn't lose track of today's accumulated realized loss.
                     "daily_loss_usdt": self.daily_loss_usdt,
                     "daily_loss_date": self.daily_loss_date,
-                    # BUG FIX: _daily_loss_alert_sent_date was previously
-                    # NOT persisted — caused the daily-loss-limit Telegram
-                    # alert to fire a second time after any bot restart on
-                    # the same day the limit was already hit.
-                    # daily_loss_usdt + daily_loss_date were correctly
-                    # restored, but _daily_loss_alert_sent_date came back
-                    # as None (its __init__ default), so the dedup check
-                    # in record_realized_loss() always saw None != today
-                    # and sent a duplicate alert on the next trade close.
-                    "daily_loss_alert_sent_date": self._daily_loss_alert_sent_date,
-                    # ADDED: Smart Hours Guard state (bad_hours list +
-                    # analysis schedule) survives bot restarts.
-                    "smart_hours_guard": (
-                        self.smart_hours_guard.get_state()
-                        if self.smart_hours_guard is not None else {}
-                    ),
                 }
             tmp_path = f"{self.state_file}.tmp"
             with open(tmp_path, "w") as f:
@@ -232,18 +187,6 @@ class TradeManager:
                 # exactly like a fresh day regardless of what was saved.
                 self.daily_loss_usdt = float(data.get("daily_loss_usdt", 0.0) or 0.0)
                 self.daily_loss_date = data.get("daily_loss_date")
-                # BUG FIX: restore the alert-sent marker so a same-day
-                # restart doesn't re-fire the Telegram alert. If the key
-                # is absent (older state file before this fix), get()
-                # returns None safely — backward-compatible: worst case is
-                # one extra alert on the first restart after upgrading.
-                self._daily_loss_alert_sent_date = data.get("daily_loss_alert_sent_date")
-            # ADDED: restore guard state outside the main lock (the guard
-            # has its own internal lock — nesting the two would deadlock).
-            if self.smart_hours_guard is not None:
-                self.smart_hours_guard.restore_state(
-                    data.get("smart_hours_guard", {})
-                )
             if self.open_trades:
                 logger.info(f"♻️ Restored {len(self.open_trades)} open trade(s) from "
                             f"{self.state_file}: {list(self.open_trades.keys())}")
@@ -331,60 +274,36 @@ class TradeManager:
         disabled via its Telegram toggle - existing behavior (no limit at
         all) is fully preserved when off. Never blocks managing/closing
         an ALREADY-open trade - only new entries.
+
+        ADDED (diagnostic logging, user-reported recurring bug): every
+        call now logs the exact values this decision is based on -
+        daily_loss_usdt, daily_loss_date, the configured limit, and
+        whether the guard is enabled - immediately before returning.
+        This trade has already happened twice where a new entry opened
+        on a day the limit had previously been reached, and the root
+        cause wasn't fully reproducible from screenshots alone. If it
+        recurs, these lines in the server log will show definitively
+        whether daily_loss_usdt/daily_loss_date were ever wrong at the
+        moment of the decision, or whether the amount was correct but
+        something else let a trade through anyway - turning any future
+        occurrence into something immediately diagnosable instead of
+        another guessing exercise.
         """
         self._check_daily_loss_reset()
         if not self.config.get("DAILY_LOSS_LIMIT_ENABLED", True):
+            logger.info(
+                f"🔍 daily-loss-check: GUARD DISABLED (DAILY_LOSS_LIMIT_ENABLED=False) "
+                f"→ allowing entry regardless of daily_loss_usdt=${self.daily_loss_usdt:.2f}"
+            )
             return False
         limit = self.config.get("DAILY_LOSS_LIMIT_USDT", 20.0)
-        return self.daily_loss_usdt >= limit
-
-    # ------------------------------------------------------------------
-    # ADDED: Smart Hours Guard public interface
-    # ------------------------------------------------------------------
-
-    def is_smart_hours_blocked(self) -> bool:
-        """
-        Returns True when the current hour is historically bad and new
-        entries should be skipped. Called from bot_core._execute_trade()
-        right after is_daily_loss_limit_reached() — same pattern.
-        Fail-open: returns False on any error so a guard bug never
-        stops trading entirely.
-        """
-        if self.smart_hours_guard is None:
-            return False
-        try:
-            return self.smart_hours_guard.is_blocked_now()
-        except Exception as exc:
-            logger.warning(f"SmartHoursGuard.is_blocked_now error: {exc}")
-            return False
-
-    def get_smart_hours_status_text(self) -> str:
-        """One-line status for Telegram /status. Always safe to call."""
-        if self.smart_hours_guard is None:
-            return "🔕 Not available (smart_hours_guard.py missing)"
-        try:
-            return self.smart_hours_guard.get_status_text()
-        except Exception:
-            return "⚠️ status unavailable"
-
-    def _get_trade_history_snapshot(self) -> list:
-        """
-        Thread-safe snapshot of closed trades for SmartHoursGuard.
-        Takes the trade_manager lock briefly and returns a shallow copy.
-        The guard calls this during analysis so it never holds both its
-        own lock and the trade_manager lock simultaneously.
-        """
-        with self.lock:
-            return list(self.trade_history)
-
-    def _smart_hours_alert(self, message: str) -> None:
-        """Telegram callback for SmartHoursGuard analysis alerts."""
-        logger.info(f"SmartHoursGuard alert: {message[:80]}...")
-        if _TELEGRAM_AVAILABLE:
-            try:
-                send_telegram(message)
-            except Exception as exc:
-                logger.warning(f"SmartHoursGuard Telegram alert failed: {exc}")
+        result = self.daily_loss_usdt >= limit
+        logger.info(
+            f"🔍 daily-loss-check: daily_loss_usdt=${self.daily_loss_usdt:.2f} | "
+            f"daily_loss_date={self.daily_loss_date} | limit=${limit:.2f} | "
+            f"blocking_new_entries={result}"
+        )
+        return result
 
     def reconcile_with_exchange(self):
         """
