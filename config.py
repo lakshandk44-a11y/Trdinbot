@@ -9,6 +9,33 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ============================================================
+# BOT INSTALL DIRECTORY (FIX: eliminate an entire class of "relative
+# path breaks on restart" bugs across every state/settings/cache file)
+# ============================================================
+# BUG FIX (user-reported, confirmed twice via live logs/screenshots):
+# TRADE_STATE_FILE, SETTINGS_OVERRIDE_FILE, and CALIBRATION_TABLE_FILE
+# all previously defaulted to bare relative filenames (e.g.
+# "trade_state.json"). A relative path resolves against the process's
+# CURRENT WORKING DIRECTORY at the moment it's opened - NOT guaranteed
+# to be the same directory every time PM2 (auto-restart-on-crash) or a
+# VPS reboot relaunches the bot, unless cwd is explicitly pinned
+# everywhere the process is started from. When a restart happened to
+# launch from a different working directory, any of these files could
+# silently "not be found" and the bot would start fresh on that file -
+# for TRADE_STATE_FILE specifically this meant losing track of how much
+# had already been lost today, letting new trades open again on a day
+# the daily loss limit was supposed to still be blocking.
+#
+# Fix: every file-path default below is now built from THIS config.py
+# file's own directory (the bot's install directory - a fixed, stable
+# location regardless of whatever directory the process happens to be
+# launched from), so every restart - regardless of how or from where
+# it's triggered - reliably finds the exact same files. Anyone already
+# setting TRADE_STATE_FILE via an explicit environment variable keeps
+# that override exactly as before - nothing changes for them.
+_BOT_INSTALL_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# ============================================================
 # BINANCE API CONFIGURATION
 # ============================================================
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "YOUR_BINANCE_API_KEY_HERE")
@@ -100,7 +127,7 @@ TELEGRAM_ADMIN_CHAT_ID = "8804792847"  # ONLY this chat's commands/button-taps
 # are accepted by telegram_control.py - anyone else messaging the bot is
 # silently ignored. Change this if you ever need to control the bot from a
 # different Telegram account/chat.
-SETTINGS_OVERRIDE_FILE = "settings_override.json"  # where Telegram-toggled
+SETTINGS_OVERRIDE_FILE = os.path.join(_BOT_INSTALL_DIR, "settings_override.json")  # where Telegram-toggled
 # settings (and pause state) are saved, so they survive a bot/VPS restart.
 MIN_PROFIT_CHANCE = 35.0  # FIX: calibration_table.json (27,042 real backtested
 # setups) shows NO score bucket ever reaches 65% real win-rate — the
@@ -268,7 +295,7 @@ USE_ISOLATED_MARGIN = False
 # to match a sane value. Making them explicit here means they're visible
 # and tunable like every other setting, not silently dependent on a
 # default buried in bot_core.py/trade_manager.py/analysis_engine.py.
-CALIBRATION_TABLE_FILE = "calibration_table.json"
+CALIBRATION_TABLE_FILE = os.path.join(_BOT_INSTALL_DIR, "calibration_table.json")
 CALIBRATION_MIN_SAMPLES = 20  # a score bucket needs at least this many backtested samples to be trusted
 REVERSAL_COOLDOWN_SECONDS = 240  # grace period after entry before reversal-based early-close can trigger
 
@@ -282,38 +309,10 @@ TRADING_FEE_PERCENT = 0.05     # % per side (Binance default taker fee)
 # STATE PERSISTENCE (FIX: survive bot/VPS restarts without losing
 # track of open positions and their SL/TP levels)
 # ============================================================
-# BUG FIX (user-reported, confirmed via screenshots): TRADE_STATE_FILE
-# previously defaulted to the bare relative filename "trade_state.json".
-# A relative path resolves against the process's CURRENT WORKING
-# DIRECTORY at the moment it's opened - which is NOT guaranteed to be
-# the same directory every time PM2 (auto-restart-on-crash) or a VPS
-# reboot relaunches the bot, unless cwd is explicitly pinned everywhere
-# it's started from. When a restart happened to launch from a different
-# working directory, _load_state() would look for the file in the WRONG
-# place, find nothing (os.path.exists() -> False), and silently start
-# fresh - meaning today's already-accumulated daily_loss_usdt (and the
-# fact the $ limit had already been reached) was lost, letting new
-# trades open again on the SAME calendar day the limit was supposed to
-# still be blocking. This is very likely what happened around the
-# restart window in the reported incident (limit correctly reached and
-# enforced at 02:24, confirmed still ON via /status at 10:01, then a new
-# trade opened at 10:15 - consistent with a restart landing in that
-# 14-minute gap from a different working directory).
-#
-# Fix: default to an ABSOLUTE path derived from THIS config.py file's
-# own directory (the bot's install directory - a fixed, stable location
-# regardless of whatever directory the process happens to be launched
-# from). This makes state-file location 100% independent of cwd, so
-# every restart - regardless of how or from where it's triggered -
-# reliably finds the exact same file. An explicit TRADE_STATE_FILE
-# environment variable (absolute or relative, if someone specifically
-# wants that) still overrides this default exactly as before - nothing
-# changes for anyone already setting it explicitly.
-_BOT_INSTALL_DIR = os.path.dirname(os.path.abspath(__file__))
 TRADE_STATE_FILE = os.getenv("TRADE_STATE_FILE", os.path.join(_BOT_INSTALL_DIR, "trade_state.json"))
 
 # ============================================================
 # LOGGING
 # ============================================================
 LOG_LEVEL = "INFO"
-LOG_FILE = "hackerai_bot.log"
+LOG_FILE = os.path.join(_BOT_INSTALL_DIR, "hackerai_bot.log")
