@@ -12,27 +12,15 @@ load_dotenv()
 # BOT INSTALL DIRECTORY (FIX: eliminate an entire class of "relative
 # path breaks on restart" bugs across every state/settings/cache file)
 # ============================================================
-# BUG FIX (user-reported, confirmed twice via live logs/screenshots):
+# BUG FIX (user-reported, confirmed via live logs/screenshots):
 # TRADE_STATE_FILE, SETTINGS_OVERRIDE_FILE, and CALIBRATION_TABLE_FILE
-# all previously defaulted to bare relative filenames (e.g.
-# "trade_state.json"). A relative path resolves against the process's
-# CURRENT WORKING DIRECTORY at the moment it's opened - NOT guaranteed
-# to be the same directory every time PM2 (auto-restart-on-crash) or a
-# VPS reboot relaunches the bot, unless cwd is explicitly pinned
-# everywhere the process is started from. When a restart happened to
-# launch from a different working directory, any of these files could
-# silently "not be found" and the bot would start fresh on that file -
-# for TRADE_STATE_FILE specifically this meant losing track of how much
-# had already been lost today, letting new trades open again on a day
-# the daily loss limit was supposed to still be blocking.
-#
-# Fix: every file-path default below is now built from THIS config.py
-# file's own directory (the bot's install directory - a fixed, stable
-# location regardless of whatever directory the process happens to be
-# launched from), so every restart - regardless of how or from where
-# it's triggered - reliably finds the exact same files. Anyone already
-# setting TRADE_STATE_FILE via an explicit environment variable keeps
-# that override exactly as before - nothing changes for them.
+# all previously defaulted to bare relative filenames. A relative path
+# resolves against the process's CURRENT WORKING DIRECTORY at the
+# moment it's opened - not guaranteed to be the same directory every
+# time PM2 or a VPS reboot relaunches the bot. Every file-path default
+# below is now built from THIS config.py file's own directory (a
+# fixed, stable location), so every restart reliably finds the exact
+# same files regardless of what directory the process launches from.
 _BOT_INSTALL_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # ============================================================
@@ -238,6 +226,49 @@ FUNDING_RATE_ENABLED = True
 # open/still-running trade's unrealized PnL. Toggle from Telegram /menu.
 DAILY_LOSS_LIMIT_ENABLED = True
 DAILY_LOSS_LIMIT_USDT = 20.0   # change this $ amount to whatever fits your account size
+
+# ============================================================
+# SMART HOURS GUARD  —  auto-learn & block historically bad hours
+# ============================================================
+SMART_HOURS_GUARD_ENABLED        = True
+SMART_HOURS_LOOKBACK_DAYS        = 30     # days of history to analyse
+SMART_HOURS_REANALYZE_DAYS       = 3      # how often to rebuild the bad-hours list
+SMART_HOURS_MIN_TOTAL_TRADES     = 20     # minimum total recent trades before any blocking
+SMART_HOURS_MIN_SAMPLES          = 4      # minimum trades per hour to classify it
+SMART_HOURS_MIN_SPREAD_DAYS      = 2      # losses must span this many different calendar days
+SMART_HOURS_LOSS_RATE_THRESHOLD  = 0.70   # weighted loss rate threshold (0.70 = 70 %)
+
+# ============================================================
+# VOLATILITY GUARD — real-time, per-symbol volatility spike detector
+# ============================================================
+# Blocks NEW entries on a symbol when its CURRENT volatility (ATR) is
+# abnormally elevated relative to its OWN recent history - independent
+# of Smart Hours Guard (which looks at historical hour-of-day patterns,
+# not real-time conditions). Deliberately STATELESS: recomputed fresh
+# from the same OHLC candles already fetched for analysis on every
+# check, so there is nothing to persist and therefore nothing that can
+# be lost or go stale across a bot/VPS restart.
+#
+# HOW IT DECIDES:
+#   current_ATR  = ATR(VOLATILITY_GUARD_ATR_PERIOD) on the most recent
+#                  closed candle of VOLATILITY_GUARD_TIMEFRAME.
+#   baseline_ATR = average ATR over the preceding
+#                  VOLATILITY_GUARD_BASELINE_CANDLES candles.
+#   ratio = current_ATR / baseline_ATR
+#   ratio >= VOLATILITY_GUARD_RATIO_THRESHOLD -> block new entries on
+#   THIS symbol only, THIS check only. Already-open trades (on any
+#   symbol) are never affected - SL/TP/trailing continue managing them
+#   exactly as before.
+#
+# Fails OPEN (does not block) whenever there isn't enough candle
+# history yet to compute a reliable ratio - never blocks on
+# uncertainty. Toggle ON/OFF live from Telegram /menu, no restart
+# needed.
+VOLATILITY_GUARD_ENABLED           = True
+VOLATILITY_GUARD_ATR_PERIOD        = 14     # ATR calculation period (candles)
+VOLATILITY_GUARD_BASELINE_CANDLES  = 100    # how many candles' ATR to average for the baseline
+VOLATILITY_GUARD_RATIO_THRESHOLD   = 2.0    # current/baseline ATR ratio that triggers a block
+VOLATILITY_GUARD_TIMEFRAME         = "lower"  # which OHLC timeframe to use (matches TIMEFRAMES keys)
 
 SMT_CORRELATED_MAP = {}         # optional per-symbol override, e.g. {"SOLUSDT": "ETHUSDT"} - falls back to BTCUSDT (or ETHUSDT when scanning BTCUSDT itself) when a symbol isn't listed
 DAILY_HISTORY_CANDLES = 200     # ~6.5 months of daily candles fetched per symbol for Macro Structure (PDH/PDL/PWH/PWL) and Old Highs/Lows
