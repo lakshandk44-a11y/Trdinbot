@@ -71,6 +71,11 @@ TOGGLE_DEFINITIONS = [
     # current volatility (ATR) is abnormally high vs its own recent
     # history. Independent of Smart Hours Guard (real-time vs historical).
     {"code": "VOLGUARD", "config_key": "VOLATILITY_GUARD_ENABLED",     "label": "Volatility Guard"},
+    # ADDED: Open Interest Confluence — checks whether Binance's own OI
+    # data confirms or contradicts a trade signal (real new positioning
+    # vs existing positions unwinding). Score adjustment only - never
+    # gates/blocks a trade by itself, unlike the guards above.
+    {"code": "OICONF", "config_key": "OI_CONFLUENCE_ENABLED",         "label": "Open Interest Confluence"},
 ]
 
 
