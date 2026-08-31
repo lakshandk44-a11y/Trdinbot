@@ -218,6 +218,29 @@ SMT_DIVERGENCE_ENABLED = True   # fetch a correlated symbol's candles for SMT Di
 # same pattern as SMT_DIVERGENCE_ENABLED above. Set False to disable.
 FUNDING_RATE_ENABLED = True
 
+# ============================================================
+# OPEN INTEREST CONFLUENCE — professional-trader-style positioning signal
+# ============================================================
+# Fetches Binance's own Open Interest history for the symbol being
+# scanned (GET /futures/data/openInterestHist - real, live exchange
+# data, no third-party service) and checks whether OI is moving in the
+# SAME direction as the current tool-vote lean. Rising OI alongside the
+# move means genuinely NEW positions are being opened (real conviction
+# behind it); falling OI alongside the move means the move is being
+# driven by EXISTING positions closing (short covering on a rally, long
+# liquidation on a selloff) - a classic "this move may run out of
+# steam" warning. Purely additive, exactly like FUNDING_RATE_ENABLED
+# above - folds into AnalysisEngine._calculate_profit_chance as a score
+# adjustment only. Never gates/blocks a trade by itself, never touches
+# the 5-tool voting (MIN_TOOLS_MATCH) - it only ever nudges the
+# confidence score for a signal the 5 tools have already produced.
+# Stateless (recomputed fresh every scan, nothing persisted) - toggle
+# ON/OFF live from Telegram /menu, no restart needed.
+OI_CONFLUENCE_ENABLED    = True
+OI_HISTORY_PERIOD        = "15m"  # granularity of OI history (matches TIMEFRAMES["lower"])
+OI_HISTORY_LOOKBACK      = 20     # number of OI readings to compare (20 x 15m ≈ 5 hours)
+OI_CHANGE_THRESHOLD_PCT  = 1.5    # minimum OI % change considered a meaningful shift
+
 # ADDED (user request): daily realized-loss limit. Purely local, no extra
 # API calls - see TradeManager.record_realized_loss/is_daily_loss_limit_
 # reached in trade_manager.py. Resets automatically at the next calendar
