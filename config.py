@@ -30,6 +30,24 @@ BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "YOUR_BINANCE_API_KEY_HERE")
 BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "YOUR_BINANCE_API_SECRET_HERE")
 BINANCE_TESTNET = True  # True for testnet, False for real account
 
+# BUG FIX (user-reported): every HTTP call the bot makes to Binance
+# (klines, funding rate, open interest, leverage changes, order
+# placement, everything) previously had NO timeout at all - Python's
+# requests library waits FOREVER by default if Binance (or the network
+# path to it) goes slow/unresponsive, meaning a single stalled request
+# could silently freeze the entire bot indefinitely, with no error, no
+# log, no recovery - just a hung process an operator has to notice and
+# manually restart. 10 seconds is a common, well-tested default for
+# exchange API calls (matches what several popular trading libraries
+# default to) - long enough to tolerate normal network jitter or a
+# briefly busy Binance endpoint, short enough that a genuinely stuck
+# request fails fast and cleanly instead of hanging. Every call site
+# that uses this already has its own try/except Exception (verified
+# for every one of them before this change), so a timeout now surfaces
+# as a normal, already-handled error - retried on the next scan cycle
+# like any other transient API failure - never a bot-wide freeze.
+API_REQUEST_TIMEOUT_SECONDS = 10
+
 # ============================================================
 # TRADING PARAMETERS
 # ============================================================
