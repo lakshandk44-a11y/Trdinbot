@@ -76,6 +76,12 @@ TOGGLE_DEFINITIONS = [
     # vs existing positions unwinding). Score adjustment only - never
     # gates/blocks a trade by itself, unlike the guards above.
     {"code": "OICONF", "config_key": "OI_CONFLUENCE_ENABLED",         "label": "Open Interest Confluence"},
+    # ADDED: Volume-Rank Leverage Cap — reduces leverage (never blocks
+    # the trade, never touches margin sizing) for coins ranked lower by
+    # 24h volume within the scanned Top-N, since thinner order books can
+    # suffer real STOP_MARKET slippage even when recent price action
+    # looked calm. Complementary to the existing volatility-based cap.
+    {"code": "VOLLEVCAP", "config_key": "VOLUME_LEVERAGE_CAP_ENABLED",  "label": "Volume-Rank Leverage Cap"},
 ]
 
 
