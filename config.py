@@ -59,7 +59,7 @@ RISK_PER_TRADE = 0.02  # 2% risk per trade (for position sizing)
 # SIGNAL REQUIREMENTS (à¶”à¶¶à·š à¶…à¶½à·”à¶­à·Š conditions)
 # ============================================================
 MIN_TOOLS_MATCH = 3  # Tools 5à¶±à·Š à¶…à·€à¶¸ à¶œà·à¶½à¶´à·™à¶± à¶œà¶«à¶± (5/3 rule)
-MIN_SUBCONCEPTS_PER_TOOL = 2  # FIX (user request, reverted from 2): each of
+MIN_SUBCONCEPTS_PER_TOOL = 1  # FIX (user request, reverted from 2): each of
 # the 5 tools has many of its own named sub-concepts internally (Tool 1
 # alone has 9+: BOS, CHoCH, MSS, SMT Divergence, Macro Break, Unicorn Model,
 # Inverse Fairy Tale, Old High/Low reaction, Wyckoff breakout). A tool only
@@ -310,6 +310,41 @@ VOLATILITY_GUARD_ATR_PERIOD        = 14     # ATR calculation period (candles)
 VOLATILITY_GUARD_BASELINE_CANDLES  = 100    # how many candles' ATR to average for the baseline
 VOLATILITY_GUARD_RATIO_THRESHOLD   = 2.0    # current/baseline ATR ratio that triggers a block
 VOLATILITY_GUARD_TIMEFRAME         = "lower"  # which OHLC timeframe to use (matches TIMEFRAMES keys)
+
+# ============================================================
+# VOLUME-RANK LEVERAGE CAP — thin-liquidity slippage protection
+# ============================================================
+# Complementary to calculate_dynamic_leverage() (which reduces leverage
+# based on a coin's recent PRICE volatility). This caps leverage based
+# on a DIFFERENT, independent risk factor: the coin's RELATIVE 24h
+# trading-volume rank within the scanned Top-N universe (rank 1 =
+# highest volume that scan cycle). A coin can show calm recent price
+# action (the existing volatility check wouldn't reduce leverage) while
+# still sitting near the bottom of the Top-N list - meaning its order
+# book is comparatively thin, so a STOP_MARKET order can suffer real
+# slippage on a sudden move even though nothing in recent candles
+# hinted at it (exactly the scenario behind the user-reported TUTUSDT
+# -49% loss, where the exit price landed well past the configured stop
+# due to thin liquidity, not a bad stop-loss level or bad analysis).
+#
+# Uses RANK, not an absolute $ volume threshold, so this automatically
+# adapts to overall market conditions - "the bottom third of today's
+# Top-50" is always the relatively thinner group, whether that's a
+# quiet bear market or a frothy bull market.
+#
+# Never affects whether a trade opens (guards like Daily Loss Limit /
+# Smart Hours Guard / Volatility Guard already decide that) and never
+# touches the 5% margin-per-trade sizing - only caps the LEVERAGE
+# multiplier applied to that already-fixed margin, exactly like
+# calculate_dynamic_leverage() already does. Fails OPEN (no additional
+# cap) whenever a symbol's rank isn't available that cycle - never
+# blocks or restricts on uncertainty. Toggle ON/OFF live from Telegram
+# /menu, no restart needed.
+VOLUME_LEVERAGE_CAP_ENABLED      = True
+VOLUME_LEVERAGE_TIER1_MAX_RANK   = 15   # rank 1-15 (most liquid): no additional cap
+VOLUME_LEVERAGE_TIER2_MAX_RANK   = 30   # rank 16-30 (mid liquidity): capped below
+VOLUME_LEVERAGE_TIER2_MAX_LEVERAGE = 5  # leverage cap for rank 16-30
+VOLUME_LEVERAGE_TIER3_MAX_LEVERAGE = 3  # leverage cap for rank 31+ (thinnest tier scanned)
 
 SMT_CORRELATED_MAP = {}         # optional per-symbol override, e.g. {"SOLUSDT": "ETHUSDT"} - falls back to BTCUSDT (or ETHUSDT when scanning BTCUSDT itself) when a symbol isn't listed
 DAILY_HISTORY_CANDLES = 200     # ~6.5 months of daily candles fetched per symbol for Macro Structure (PDH/PDL/PWH/PWL) and Old Highs/Lows
