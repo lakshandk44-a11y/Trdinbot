@@ -40,6 +40,10 @@ API_BASE = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 POLL_TIMEOUT_SECONDS = 25  # Telegram long-poll wait
 REQUEST_TIMEOUT_SECONDS = 30  # HTTP timeout, must exceed POLL_TIMEOUT_SECONDS
 
+# ADDED (user request): how many coins the "🪙 Coin List View" menu shows
+# per page, so the chat doesn't get too long for a 50-coin universe.
+COINS_PER_PAGE = 10
+
 # ----------------------------------------------------------------------
 # Only these config keys are togglable from Telegram - deliberately a
 # small, hand-picked allowlist of settings that are safe to flip live
@@ -101,6 +105,13 @@ class TelegramController:
         self.running = False
         self.thread: Optional[threading.Thread] = None
         self._offset = 0
+        # ADDED (user request): manually-disabled coins for the new
+        # "🪙 Coin List View" menu - a coin's symbol lives in this set
+        # while it's switched OFF. Restored from disk in
+        # _load_and_apply_overrides() below (same file/pattern as every
+        # other Telegram-toggled setting), read by bot_core.
+        # _filter_disabled_coins() every scan cycle.
+        self.disabled_coins: set = set()
 
         if not TELEGRAM_BOT_TOKEN or not self.admin_chat_id:
             logger.warning("⚠️ Telegram control panel disabled - "
@@ -124,6 +135,15 @@ class TelegramController:
                         self.config[tog["config_key"]] = overrides[tog["config_key"]]
                 if "PAUSED" in overrides:
                     self.bot.paused = bool(overrides["PAUSED"])
+                # ADDED (user request - manual coin ON/OFF switches):
+                # restore which coins were manually disabled, so a bot/
+                # VPS restart never silently re-enables a coin you turned
+                # off. Anything that isn't a plain string is ignored
+                # rather than raising, in case the file is ever hand-
+                # edited or predates this key.
+                disabled = overrides.get("DISABLED_COINS", [])
+                if isinstance(disabled, list):
+                    self.disabled_coins = {s for s in disabled if isinstance(s, str)}
                 logger.info(f"🎛️ Telegram control: restored saved settings from {self.override_file}")
         except Exception as e:
             logger.warning(f"Telegram control: could not load {self.override_file}: {e}")
@@ -133,6 +153,10 @@ class TelegramController:
             data = {tog["config_key"]: bool(self.config.get(tog["config_key"], False))
                     for tog in TOGGLE_DEFINITIONS}
             data["PAUSED"] = bool(self.bot.paused)
+            # ADDED (user request): persist manually-disabled coins the
+            # same way every other Telegram-toggled setting already
+            # survives a bot/VPS restart (see SETTINGS_OVERRIDE_FILE).
+            data["DISABLED_COINS"] = sorted(self.disabled_coins)
             with open(self.override_file, "w") as f:
                 json.dump(data, f, indent=2)
         except Exception as e:
@@ -194,6 +218,9 @@ class TelegramController:
         toggle_buttons = [{"text": self._toggle_button_text(tog), "callback_data": f"t:{tog['code']}"}
                            for tog in TOGGLE_DEFINITIONS]
         rows = [toggle_buttons[i:i + 2] for i in range(0, len(toggle_buttons), 2)]
+        # ADDED (user request): separate section to view/manually switch
+        # individual scanned coins ON/OFF - see _build_coin_keyboard().
+        rows.append([{"text": "🪙 Coin List View", "callback_data": "coins"}])
         rows.append([{"text": self._pause_button_text(), "callback_data": "t:PAUSE"}])
         rows.append([{"text": "📊 Status", "callback_data": "status"}])
         return {"inline_keyboard": rows}
@@ -209,6 +236,95 @@ class TelegramController:
             "chat_id": chat_id, "message_id": message_id, "text": text,
             "parse_mode": "Markdown", "reply_markup": self._build_menu_keyboard(),
         })
+
+    # ------------------------------------------------------------------
+    # ADDED (user request): Coin List View - paginated (10/page) list of
+    # every coin the bot is currently scanning, each with its own tappable
+    # ON/OFF button. Toggling a coin here only ever blocks a brand-new
+    # trade on that symbol - see bot_core._filter_disabled_coins() for why
+    # a coin that already has an open trade keeps being scanned/managed
+    # normally even while disabled. State (self.disabled_coins) is saved
+    # to SETTINGS_OVERRIDE_FILE by _save_overrides(), same file/pattern as
+    # every other Telegram-toggled setting, so it survives a bot/VPS
+    # restart exactly like PAUSED and the settings toggles already do.
+    # ------------------------------------------------------------------
+    def _get_scan_universe(self):
+        """
+        The exact coin list the bot is scanning right now, kept fresh by
+        bot_core._get_top_coins() every cycle. Falls back to the static
+        config TOP_N_COINS list before the very first scan cycle has run
+        (e.g. right after a fresh start) so the menu is never empty.
+        """
+        coins = list(getattr(self.bot, "last_scanned_coins", None) or [])
+        if not coins:
+            coins = list(self.config.get("TOP_N_COINS", []))
+        return coins
+
+    def _resolve_coin_page(self, page: int):
+        """Clamps a requested page into range and returns (page, total_pages, coins)."""
+        coins = self._get_scan_universe()
+        total_pages = max(1, (len(coins) + COINS_PER_PAGE - 1) // COINS_PER_PAGE)
+        page = max(0, min(page, total_pages - 1))
+        return page, total_pages, coins
+
+    def _build_coin_keyboard(self, page: int) -> Dict:
+        page, total_pages, coins = self._resolve_coin_page(page)
+        start = page * COINS_PER_PAGE
+        page_coins = coins[start:start + COINS_PER_PAGE]
+
+        coin_buttons = [
+            {"text": f"{'🔴' if sym in self.disabled_coins else '🟢'} {sym}",
+             "callback_data": f"cx:{page}:{sym}"}
+            for sym in page_coins
+        ]
+        rows = [coin_buttons[i:i + 2] for i in range(0, len(coin_buttons), 2)]
+
+        nav_row = []
+        if page > 0:
+            nav_row.append({"text": "⬅️ Prev", "callback_data": f"cp:{page - 1}"})
+        nav_row.append({"text": f"{page + 1}/{total_pages}", "callback_data": "noop"})
+        if page < total_pages - 1:
+            nav_row.append({"text": "Next ➡️", "callback_data": f"cp:{page + 1}"})
+        rows.append(nav_row)
+
+        rows.append([{"text": "⬅️ Back to Menu", "callback_data": "back"}])
+        return {"inline_keyboard": rows}
+
+    def _build_coin_list_text(self, page: int) -> str:
+        page, total_pages, coins = self._resolve_coin_page(page)
+        total = len(coins)
+        off_count = sum(1 for s in coins if s in self.disabled_coins)
+        on_count = total - off_count
+        return (
+            f"🪙 *Coin List* — Page {page + 1}/{total_pages}\n"
+            f"🟢 Scanning: {on_count}/{total}    🔴 Off: {off_count}/{total}\n"
+            f"Tap a coin to switch it ON/OFF.\n"
+            f"(A coin already in an open trade keeps being managed normally "
+            f"even if switched OFF here - only new entries on it are blocked.)"
+        )
+
+    def _send_coin_list(self, chat_id: str, page: int = 0):
+        self._api_call("sendMessage", {
+            "chat_id": chat_id, "text": self._build_coin_list_text(page),
+            "parse_mode": "Markdown", "reply_markup": self._build_coin_keyboard(page),
+        })
+
+    def _edit_coin_list(self, chat_id: str, message_id: int, page: int):
+        self._api_call("editMessageText", {
+            "chat_id": chat_id, "message_id": message_id,
+            "text": self._build_coin_list_text(page),
+            "parse_mode": "Markdown", "reply_markup": self._build_coin_keyboard(page),
+        })
+
+    def _handle_toggle_coin(self, symbol: str):
+        if symbol in self.disabled_coins:
+            self.disabled_coins.discard(symbol)
+            logger.info(f"🪙 Telegram control: {symbol} switched ON (scanning resumed)")
+        else:
+            self.disabled_coins.add(symbol)
+            logger.info(f"🪙 Telegram control: {symbol} switched OFF (new entries blocked; "
+                        f"any already-open trade on it keeps being managed normally)")
+        self._save_overrides()
 
     def _build_status_text(self) -> str:
         state = "⏸️ PAUSED (not opening new trades)" if self.bot.paused else "▶️ RUNNING"
@@ -306,6 +422,9 @@ class TelegramController:
             {"command": "menu", "description": "Show control panel buttons"},
             {"command": "status", "description": "Bot status + open trades"},
             {"command": "rate", "description": "Win/loss rate of closed trades"},
+            # ADDED (user request): quick shortcut into the Coin List View,
+            # same screen the "🪙 Coin List View" menu button opens.
+            {"command": "coins", "description": "View/switch individual coins ON/OFF"},
             {"command": "help", "description": "List all commands"},
         ]
         self._api_call("setMyCommands", {"commands": commands})
@@ -342,6 +461,31 @@ class TelegramController:
             elif data.startswith("t:"):
                 self._handle_toggle(data[2:])
                 self._edit_menu(chat_id, message_id, "🎛️ *Bot Control Panel*\nTap to toggle:")
+            # ADDED (user request): Coin List View routing - opening it,
+            # paging through it, toggling a coin, and returning to the
+            # main menu. Each handler re-renders in place (editMessageText)
+            # so tapping never spams new messages into the chat.
+            elif data == "coins":
+                self._edit_coin_list(chat_id, message_id, 0)
+            elif data.startswith("cp:"):
+                try:
+                    page = int(data[3:])
+                except ValueError:
+                    page = 0
+                self._edit_coin_list(chat_id, message_id, page)
+            elif data.startswith("cx:"):
+                try:
+                    _, page_str, symbol = data.split(":", 2)
+                    page = int(page_str)
+                except ValueError:
+                    page, symbol = 0, ""
+                if symbol:
+                    self._handle_toggle_coin(symbol)
+                self._edit_coin_list(chat_id, message_id, page)
+            elif data == "back":
+                self._edit_menu(chat_id, message_id, "🎛️ *Bot Control Panel*\nTap to toggle:")
+            elif data == "noop":
+                pass  # page-number button - already answered above, no re-render needed
             return
 
         if "message" in update:
@@ -359,6 +503,8 @@ class TelegramController:
                 self._api_call("sendMessage", {
                     "chat_id": chat_id, "text": self._build_rate_text(), "parse_mode": "Markdown",
                 })
+            elif text == "/coins":
+                self._send_coin_list(chat_id)
             elif text == "/help":
                 self._api_call("sendMessage", {
                     "chat_id": chat_id,
@@ -366,6 +512,7 @@ class TelegramController:
                               "/menu - show control panel buttons\n"
                               "/status - show bot status + open trades\n"
                               "/rate - win/loss rate of closed trades\n"
+                              "/coins - view/switch individual coins ON/OFF\n"
                               "/help - this message"),
                 })
 
