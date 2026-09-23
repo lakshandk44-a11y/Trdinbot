@@ -135,7 +135,7 @@ TELEGRAM_ADMIN_CHAT_ID = "8804792847"  # ONLY this chat's commands/button-taps
 # different Telegram account/chat.
 SETTINGS_OVERRIDE_FILE = os.path.join(_BOT_INSTALL_DIR, "settings_override.json")  # where Telegram-toggled
 # settings (and pause state) are saved, so they survive a bot/VPS restart.
-MIN_PROFIT_CHANCE = 35.0  # FIX: calibration_table.json (27,042 real backtested
+MIN_PROFIT_CHANCE = 45.0  # FIX: calibration_table.json (27,042 real backtested
 # setups) shows NO score bucket ever reaches 65% real win-rate — the
 # highest bucket (90-100 raw score) only wins 51.7% of the time. Since
 # analysis_engine._get_calibrated_profit_chance() replaces the raw score
@@ -345,6 +345,53 @@ VOLUME_LEVERAGE_TIER1_MAX_RANK   = 15   # rank 1-15 (most liquid): no additional
 VOLUME_LEVERAGE_TIER2_MAX_RANK   = 30   # rank 16-30 (mid liquidity): capped below
 VOLUME_LEVERAGE_TIER2_MAX_LEVERAGE = 5  # leverage cap for rank 16-30
 VOLUME_LEVERAGE_TIER3_MAX_LEVERAGE = 3  # leverage cap for rank 31+ (thinnest tier scanned)
+
+# ============================================================
+# COIN PERFORMANCE AUTO-GUARD (user request) — auto-tracks each coin's
+# own win/loss record and can auto-disable a chronically losing coin
+# from the 30-sec scanning loop, same enforcement path as a coin you
+# manually switch OFF from Telegram's "🪙 Coin List View" (see
+# coin_performance_guard.py / bot_core._filter_disabled_coins).
+# ============================================================
+COIN_PERFORMANCE_GUARD_ENABLED = True  # master switch - Telegram-toggleable
+# ("Coin Performance Auto-Guard" in /menu), like every other guard. False =
+# feature fully off: no new auto-disables, AND any coin currently
+# auto-disabled immediately resumes scanning (manual disables from the
+# Coin List View are a separate, unaffected mechanism).
+
+COIN_PERF_LOOKBACK_DAYS = 30  # only trades CLOSED within this many days are
+# counted toward a coin's win rate - matches the user's "last 30 days /
+# last month" request.
+
+COIN_PERF_MIN_TRADES = 12  # a coin needs AT LEAST this many CLOSED trades
+# within COIN_PERF_LOOKBACK_DAYS before any auto-disable decision is made
+# at all (user request: 10-15, to stop 1-2 early losses from triggering
+# this on a tiny sample). Below this count, the coin is left alone
+# completely - same as if this whole guard didn't exist for it yet.
+
+# Two independent tiers, checked worst-first. Win rate uses the exact same
+# fee-adjusted pnl_percent > 0 definition telegram_control._build_rate_text()
+# already uses, so "win rate" here always means the same thing it does
+# everywhere else in the bot.
+COIN_PERF_PERMANENT_WINRATE_THRESHOLD = 25.0  # win rate AT OR BELOW this ->
+# PERMANENT auto-disable (stays off until a manual Telegram override -
+# see clear_manual_override in coin_performance_guard.py). Chosen well
+# below the ~36-39% real breakeven noted elsewhere in this file (TP1_
+# REANALYSIS / TRADING_HOURS_FILTER comments) - only a coin that's
+# clearly, badly broken gets this tier. Re-tune after real trading data.
+COIN_PERF_COOLDOWN_WINRATE_THRESHOLD = 40.0  # win rate above the permanent
+# threshold but AT OR BELOW this -> TEMPORARY COOLDOWN auto-disable for
+# COIN_PERF_COOLDOWN_DAYS, then automatic re-enable - no manual action
+# needed. Above this = performance is fine, no action.
+COIN_PERF_COOLDOWN_DAYS = 30  # cooldown length (user request: 30 days).
+
+COIN_PERFORMANCE_STATE_FILE = os.path.join(_BOT_INSTALL_DIR, "coin_performance_state.json")
+# Own persistence file (separate from SETTINGS_OVERRIDE_FILE) so this
+# guard's background auto-decisions and a Telegram admin's manual coin
+# toggle can never race each other writing to the same file - see
+# coin_performance_guard.py. Same _BOT_INSTALL_DIR-anchored pattern as
+# every other state file above, so it survives a PM2/VPS restart
+# regardless of the process's working directory.
 
 SMT_CORRELATED_MAP = {}         # optional per-symbol override, e.g. {"SOLUSDT": "ETHUSDT"} - falls back to BTCUSDT (or ETHUSDT when scanning BTCUSDT itself) when a symbol isn't listed
 DAILY_HISTORY_CANDLES = 200     # ~6.5 months of daily candles fetched per symbol for Macro Structure (PDH/PDL/PWH/PWL) and Old Highs/Lows
