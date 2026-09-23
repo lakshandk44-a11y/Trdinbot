@@ -86,6 +86,13 @@ TOGGLE_DEFINITIONS = [
     # suffer real STOP_MARKET slippage even when recent price action
     # looked calm. Complementary to the existing volatility-based cap.
     {"code": "VOLLEVCAP", "config_key": "VOLUME_LEVERAGE_CAP_ENABLED",  "label": "Volume-Rank Leverage Cap"},
+    # ADDED (user request): Coin Performance Auto-Guard master switch -
+    # auto-disables (permanently or for a 30-day cooldown) a coin whose
+    # own recent win rate is poor - see coin_performance_guard.py. OFF =
+    # feature fully off: no new auto-disables, and any coin currently
+    # auto-disabled immediately resumes scanning (manual Coin List View
+    # disables are a separate, unaffected mechanism).
+    {"code": "PERFGUARD", "config_key": "COIN_PERFORMANCE_GUARD_ENABLED", "label": "Coin Performance Auto-Guard"},
 ]
 
 
@@ -247,6 +254,15 @@ class TelegramController:
     # to SETTINGS_OVERRIDE_FILE by _save_overrides(), same file/pattern as
     # every other Telegram-toggled setting, so it survives a bot/VPS
     # restart exactly like PAUSED and the settings toggles already do.
+    #
+    # EXTENDED (user request - Auto-Performance Tracking): a coin can now
+    # ALSO be OFF because the Coin Performance Guard auto-disabled it
+    # (coin_performance_guard.py) - a fully separate, independently
+    # persisted mechanism (see that file's docstring for why). The list
+    # below shows THREE states so it's always obvious which is which:
+    # 🟢 ON, 🔴 OFF (manual), 🟠 OFF (auto - poor recent performance).
+    # Tapping a coin always flips its COMBINED effective state - see
+    # _handle_toggle_coin().
     # ------------------------------------------------------------------
     def _get_scan_universe(self):
         """
@@ -267,14 +283,33 @@ class TelegramController:
         page = max(0, min(page, total_pages - 1))
         return page, total_pages, coins
 
+    def _coin_auto_status(self, symbol: str) -> Optional[Dict]:
+        """None if the Coin Performance Guard isn't available or hasn't
+        auto-disabled this symbol; otherwise its status dict (tier/reason/etc)."""
+        guard = getattr(self.bot, "coin_performance_guard", None)
+        if not guard:
+            return None
+        try:
+            return guard.get_status(symbol)
+        except Exception:
+            return None
+
+    def _coin_status_emoji(self, symbol: str, auto_status: Optional[Dict] = None) -> str:
+        if symbol in self.disabled_coins:
+            return "🔴"  # manually OFF
+        if auto_status is None:
+            auto_status = self._coin_auto_status(symbol)
+        if auto_status:
+            return "🟠"  # auto-OFF (Performance Guard)
+        return "🟢"  # ON
+
     def _build_coin_keyboard(self, page: int) -> Dict:
         page, total_pages, coins = self._resolve_coin_page(page)
         start = page * COINS_PER_PAGE
         page_coins = coins[start:start + COINS_PER_PAGE]
 
         coin_buttons = [
-            {"text": f"{'🔴' if sym in self.disabled_coins else '🟢'} {sym}",
-             "callback_data": f"cx:{page}:{sym}"}
+            {"text": f"{self._coin_status_emoji(sym)} {sym}", "callback_data": f"cx:{page}:{sym}"}
             for sym in page_coins
         ]
         rows = [coin_buttons[i:i + 2] for i in range(0, len(coin_buttons), 2)]
@@ -293,11 +328,12 @@ class TelegramController:
     def _build_coin_list_text(self, page: int) -> str:
         page, total_pages, coins = self._resolve_coin_page(page)
         total = len(coins)
-        off_count = sum(1 for s in coins if s in self.disabled_coins)
-        on_count = total - off_count
+        manual_off = sum(1 for s in coins if s in self.disabled_coins)
+        auto_off = sum(1 for s in coins if s not in self.disabled_coins and self._coin_auto_status(s))
+        on_count = total - manual_off - auto_off
         return (
             f"🪙 *Coin List* — Page {page + 1}/{total_pages}\n"
-            f"🟢 Scanning: {on_count}/{total}    🔴 Off: {off_count}/{total}\n"
+            f"🟢 ON: {on_count}/{total}    🔴 Manual OFF: {manual_off}    🟠 Auto OFF: {auto_off}\n"
             f"Tap a coin to switch it ON/OFF.\n"
             f"(A coin already in an open trade keeps being managed normally "
             f"even if switched OFF here - only new entries on it are blocked.)"
@@ -316,15 +352,62 @@ class TelegramController:
             "parse_mode": "Markdown", "reply_markup": self._build_coin_keyboard(page),
         })
 
+    def _send_coin_alert(self, symbol: str, action: str, source: str, note: Optional[str] = None):
+        """
+        ADDED (user request): every coin ON/OFF change - manual (from
+        here) or auto (from the Coin Performance Guard, sent by bot_core.
+        _send_coin_performance_alert) - gets its OWN Telegram alert,
+        clearly tagged with WHICH one triggered it, exactly as requested.
+        """
+        action_label = "🟢 ON" if action == "ON" else "🔴 OFF"
+        text = f"🪙 *Coin {action_label}*\nCoin: {symbol}\nTriggered by: 👤 Manual"
+        if note:
+            text += f"\n{note}"
+        self._api_call("sendMessage", {
+            "chat_id": self.admin_chat_id, "text": text, "parse_mode": "Markdown",
+        })
+
     def _handle_toggle_coin(self, symbol: str):
-        if symbol in self.disabled_coins:
+        """
+        Flips a coin's COMBINED effective state (manual OR auto-disabled
+        -> ON; ON -> manual OFF). If the coin was auto-disabled by the
+        Coin Performance Guard, turning it ON also clears that guard's
+        flag for this symbol (guard.clear_manual_override) - otherwise
+        the guard's own state would still show it as off, contradicting
+        what was just manually done. See coin_performance_guard.
+        clear_manual_override() for why this also resets its tracking
+        instead of leaving the stale trades that caused the auto-disable
+        able to immediately re-trigger it.
+        """
+        auto_status = self._coin_auto_status(symbol)
+        currently_off = (symbol in self.disabled_coins) or bool(auto_status)
+
+        cleared = None
+        if currently_off:
             self.disabled_coins.discard(symbol)
-            logger.info(f"🪙 Telegram control: {symbol} switched ON (scanning resumed)")
+            if auto_status:
+                guard = getattr(self.bot, "coin_performance_guard", None)
+                if guard:
+                    try:
+                        cleared = guard.clear_manual_override(symbol)
+                    except Exception as e:
+                        logger.warning(f"Coin Performance Guard: could not clear override for {symbol}: {e}")
+            action = "ON"
         else:
             self.disabled_coins.add(symbol)
-            logger.info(f"🪙 Telegram control: {symbol} switched OFF (new entries blocked; "
-                        f"any already-open trade on it keeps being managed normally)")
+            action = "OFF"
+
         self._save_overrides()
+
+        note = None
+        if cleared:
+            note = (f"Was auto-disabled ({cleared.get('tier', '?')}) - {cleared.get('reason', '')} "
+                     f"Performance tracking reset for this coin.")
+        logger.info(f"🪙 Telegram control: {symbol} manually switched {action}"
+                    + (" (new entries blocked; any already-open trade keeps being managed normally)"
+                       if action == "OFF" else " (scanning resumed)")
+                    + (f" — {note}" if note else ""))
+        self._send_coin_alert(symbol, action, source="manual", note=note)
 
     def _build_status_text(self) -> str:
         state = "⏸️ PAUSED (not opening new trades)" if self.bot.paused else "▶️ RUNNING"
