@@ -38,17 +38,19 @@ import logging
 import re
 import time
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 
 from config import (
     BINANCE_API_KEY, BINANCE_API_SECRET, BINANCE_TESTNET,
     TOP_N_COINS, TIMEFRAMES, MIN_TOOLS_MATCH, MIN_SUBCONCEPTS_PER_TOOL,
-    TAKE_PROFIT_PERCENT, STOP_LOSS_PERCENT,
+    TAKE_PROFIT_PERCENT, STOP_LOSS_PERCENT, TRADING_FEE_PERCENT,
+    TRADING_HOURS_OVERRIDE_FILE, PATTERN_CALIBRATION_FILE,
     SMT_DIVERGENCE_ENABLED, SMT_CORRELATED_MAP, DAILY_HISTORY_CANDLES,
     OLD_HIGH_LOW_MIN_DAYS, OLD_HIGH_LOW_MAX_DAYS,
 )
+import pattern_engine
 from bot_core import BinanceFuturesClient
 from analysis_engine import AnalysisEngine
 
@@ -71,6 +73,23 @@ STRIDE = 1  # FIX: was 3 (every 3rd medium-timeframe candle) to save runtime,
 # hours completely unsampled (0 setups) - not "bad", just never checked.
 # STRIDE=1 evaluates every medium-timeframe (1h) candle, giving full
 # 24-hour coverage. Runtime will be ~3x longer.
+
+# ADDED (user request - calibrate PATTERN_MIN_CONFIDENCE against real
+# outcomes instead of a random-noise false-positive test). Pattern Engine
+# only ever looks at the LOWER timeframe (15m, see bot_core.
+# _try_pattern_engine_entry: pattern_engine.detect_best_pattern(lower_tf,
+# ...)), independently of the higher/medium/daily timeframes the main
+# Tool-5 path above needs - so this reuses the SAME lower_df already
+# fetched per symbol below rather than fetching anything new.
+PATTERN_STRIDE = 4  # every 4th 15m candle (~hourly) - patterns form over
+# many candles, so consecutive 15m candles are highly correlated/
+# overlapping samples of the same forming pattern; every-candle would
+# mostly multiply runtime without adding much genuinely new information.
+PATTERN_MIN_BUCKET_SAMPLES = 30  # classical chart patterns are naturally
+# much rarer events than "every candle has a Tool-5 score" - don't trust a
+# confidence bucket's win-rate/expectancy with fewer real matches than
+# this (same "not enough data, stay out" convention as MIN_HOUR_SAMPLES
+# above, just a lower floor since the underlying event is rarer).
 
 # Binance kline interval -> milliseconds, used to paginate klines() by
 # startTime/endTime instead of only ever getting the most recent `limit`.
@@ -322,11 +341,15 @@ def simulate_outcome(lower_df: pd.DataFrame, entry_idx: int, direction: str,
 
 def run_calibration_for_symbol(engine: AnalysisEngine, client: BinanceFuturesClient,
                                 symbol: str, months_back: int,
-                                correlated_histories: Optional[Dict[str, Dict[str, pd.DataFrame]]] = None) -> List[Dict]:
-    """Returns a list of {"score": float, "won": bool} labeled setups for one symbol,
-    using the bot's OWN current fixed-percent TP/SL (TAKE_PROFIT_PERCENT/
-    STOP_LOSS_PERCENT) - this calibrates the score against exactly what the
-    live bot actually trades with today.
+                                correlated_histories: Optional[Dict[str, Dict[str, pd.DataFrame]]] = None) -> Tuple[List[Dict], Optional[pd.DataFrame]]:
+    """Returns (labeled, lower_df): labeled is a list of {"score": float,
+    "won": bool} setups for one symbol, using the bot's OWN current
+    fixed-percent TP/SL (TAKE_PROFIT_PERCENT/STOP_LOSS_PERCENT) - this
+    calibrates the score against exactly what the live bot actually trades
+    with today. lower_df is the raw fetched lower-timeframe (15m) history -
+    ADDED (user request) so callers can reuse it for
+    run_pattern_calibration_for_symbol() below without a second fetch of
+    the same data.
 
     FIX (calibration/live mismatch): the live bot's Tool 1 also uses SMT
     Divergence (needs a correlated symbol's candles) and Macro Structure /
@@ -349,7 +372,7 @@ def run_calibration_for_symbol(engine: AnalysisEngine, client: BinanceFuturesCli
 
     if higher_df is None or medium_df is None or lower_df is None:
         logger.warning(f"{symbol}: incomplete history, skipping")
-        return []
+        return [], None
 
     time.sleep(REQUEST_PACING_SECONDS)
     daily_df = fetch_full_history(client, symbol, "1d", months_back)
@@ -439,6 +462,80 @@ def run_calibration_for_symbol(engine: AnalysisEngine, client: BinanceFuturesCli
         labeled.append({"score": raw_score, "won": won, "hour": entry_hour_utc})
 
     logger.info(f"{symbol}: {len(labeled)} labeled setups collected")
+    return labeled, lower_df
+
+
+def run_pattern_calibration_for_symbol(lower_df: pd.DataFrame, symbol: str,
+                                        stride: int = PATTERN_STRIDE) -> List[Dict]:
+    """
+    ADDED (user request - calibrate PATTERN_MIN_CONFIDENCE against real
+    backtested outcomes instead of a random-noise false-positive test).
+
+    Walk-forward backtests all 6 classical chart-pattern detectors
+    (pattern_engine.py) against the SAME lower-timeframe (15m) candles
+    run_calibration_for_symbol() already fetched for this symbol -
+    mirroring exactly how bot_core._try_pattern_engine_entry() calls
+    pattern_engine.detect_best_pattern(lower_tf, ...) live, just walked
+    forward through history instead of at one live moment. No extra
+    Binance calls - lower_df is reused, not re-fetched.
+
+    Uses min_confidence=0 here (not the live PATTERN_MIN_CONFIDENCE) to
+    capture the FULL confidence distribution - a run using the live
+    threshold would only ever see already-cherry-picked high scores and
+    could never tell us whether lower confidence tiers are actually fine
+    too, or genuinely bad.
+
+    Each match's OWN target/invalidation prices (the pattern's real
+    measured-move levels - NOT a fixed TAKE_PROFIT_PERCENT/
+    STOP_LOSS_PERCENT like the main Tool-5 path uses) are passed straight
+    into the SAME simulate_outcome() this file already uses for the main
+    path, since it already takes tp_price/sl_price as absolute prices.
+    reward_pct/risk_pct (the pattern's own real distances, as a % of
+    entry price) are recorded per match too, since a meaningful "is this
+    confidence tier actually profitable" verdict needs each bucket's real
+    average reward:risk, not just its win rate - see
+    build_pattern_buckets() below.
+    """
+    labeled: List[Dict] = []
+    if lower_df is None or len(lower_df) < LOOKBACK_LIMIT["lower"] + 10:
+        return labeled
+
+    for i in range(LOOKBACK_LIMIT["lower"], len(lower_df) - 1, stride):
+        window_start = max(0, i - LOOKBACK_LIMIT["lower"] + 1)
+        window = lower_df.iloc[window_start:i + 1]
+        try:
+            match = pattern_engine.detect_best_pattern(window, min_confidence=0)
+        except Exception:
+            match = None
+        if not match:
+            continue
+
+        direction = match.get("direction")
+        target = match.get("target")
+        invalidation = match.get("invalidation")
+        confidence = match.get("confidence")
+        if direction not in ("BUY", "SELL") or target is None or invalidation is None or confidence is None:
+            continue
+
+        entry_price = float(lower_df["close"].iloc[i])
+        if entry_price <= 0:
+            continue
+
+        try:
+            won = simulate_outcome(lower_df, i, direction, target, invalidation)
+        except Exception:
+            continue
+        if won is None:
+            continue  # neither TP nor SL resolved within the lookahead window - inconclusive, skip
+
+        labeled.append({
+            "score": confidence, "won": won,
+            "reward_pct": abs(target - entry_price) / entry_price * 100,
+            "risk_pct": abs(entry_price - invalidation) / entry_price * 100,
+            "pattern": match.get("pattern", "?"),
+        })
+
+    logger.info(f"{symbol}: {len(labeled)} pattern-match setups collected")
     return labeled
 
 
@@ -484,6 +581,251 @@ def build_hour_buckets(labeled: List[Dict]) -> Dict[str, Dict]:
         win_rate = round(b["wins"] / b["samples"] * 100, 2) if b["samples"] else None
         result[key] = {"win_rate": win_rate, "samples": b["samples"]}
     return result
+
+
+# ADDED (user request - keep TRADING_HOURS_FILTER's best-hours list
+# current without manual hand-editing of config.py every time). Same
+# breakeven formula config.py's TRADING_HOURS_FILTER comment already
+# documents: p = (SL + 2*fee) / (TP + SL) - only depends on this bot's
+# ACTUAL configured TAKE_PROFIT_PERCENT/STOP_LOSS_PERCENT/
+# TRADING_FEE_PERCENT, so it stays correct even if those are re-tuned
+# later without anyone having to remember to update this too.
+MIN_HOUR_SAMPLES = 200  # don't trust an hour's win-rate with fewer
+# backtested setups than this - same "not enough data yet, leave it
+# alone" convention SMART_HOURS_GUARD already uses live (SMART_HOURS_
+# MIN_SAMPLES in config.py). The original run had ~2,500-2,900 samples
+# per hour, so this floor only bites on an unusually short/thin run.
+MIN_QUALIFYING_HOURS = 3  # if fewer than this many hours clear breakeven,
+# treat the run as too thin/unusual to trust for something as
+# consequential as the live trading window - see
+# write_trading_hours_override() below for what happens instead.
+
+
+def select_best_trading_hours(hour_buckets: Dict[str, Dict], breakeven_percent: float,
+                               min_samples: int = MIN_HOUR_SAMPLES) -> List[int]:
+    """Returns the sorted UTC hours (0-23) whose backtested win_rate clears
+    `breakeven_percent`, using only hours with >= `min_samples` setups -
+    a thin-sample hour is skipped entirely (neither included nor
+    excluded with confidence) rather than trusted either way."""
+    qualifying = []
+    for key, bucket in hour_buckets.items():
+        win_rate = bucket.get("win_rate")
+        samples = bucket.get("samples", 0)
+        if win_rate is None or samples < min_samples:
+            continue
+        if win_rate > breakeven_percent:
+            qualifying.append(int(key.split(":")[0]))
+    return sorted(qualifying)
+
+
+def write_trading_hours_override(hour_buckets: Dict[str, Dict], months_backtested: int, total_samples: int):
+    """
+    Derives which UTC hours clear this bot's real breakeven from the
+    hour_buckets this run just computed, and writes them to
+    TRADING_HOURS_OVERRIDE_FILE. config.py reads this file at import time
+    for ALLOWED_TRADING_HOURS_UTC and falls back to its hardcoded default
+    on anything missing/invalid (see config.py) - so this is purely
+    additive: re-running this script keeps the live filter's hours
+    current; never running it (or hitting the safety gate below) leaves
+    whatever was there completely untouched.
+
+    SAFETY GATE: fewer than MIN_QUALIFYING_HOURS clearing breakeven means
+    this run's data is too thin/unusual to trust for the live trading
+    window - the override file is left exactly as it was (created or
+    not), nothing is written, and a loud warning explains why. This
+    exists specifically so a bad/thin calibration run can never silently
+    shrink live trading down to almost nothing - the same failure mode
+    that caused zero trades before, just from a different direction.
+    """
+    breakeven = (STOP_LOSS_PERCENT + 2 * TRADING_FEE_PERCENT) / (TAKE_PROFIT_PERCENT + STOP_LOSS_PERCENT) * 100
+    best_hours = select_best_trading_hours(hour_buckets, breakeven)
+
+    logger.info("=" * 65)
+    logger.info(f"Real breakeven (TP={TAKE_PROFIT_PERCENT}%/SL={STOP_LOSS_PERCENT}%/"
+                f"fee={TRADING_FEE_PERCENT}%/side): {breakeven:.2f}%")
+
+    if len(best_hours) < MIN_QUALIFYING_HOURS:
+        logger.warning(
+            f"Only {len(best_hours)} hour(s) cleared breakeven with >= {MIN_HOUR_SAMPLES} "
+            f"samples each - too few to trust for the live trading window. "
+            f"TRADING_HOURS_OVERRIDE_FILE was left UNCHANGED (existing value, if any, "
+            f"still applies). Try a longer --months window for more samples per hour."
+        )
+        logger.info("=" * 65)
+        return
+
+    old_hours = None
+    try:
+        with open(TRADING_HOURS_OVERRIDE_FILE, "r") as f:
+            old_hours = json.load(f).get("allowed_hours_utc")
+    except Exception:
+        old_hours = None
+
+    override = {
+        "generated_at": datetime.utcnow().isoformat(),
+        "months_backtested": months_backtested,
+        "total_samples": total_samples,
+        "breakeven_percent": round(breakeven, 2),
+        "min_samples_per_hour": MIN_HOUR_SAMPLES,
+        "allowed_hours_utc": best_hours,
+        "hour_buckets": hour_buckets,
+    }
+    with open(TRADING_HOURS_OVERRIDE_FILE, "w") as f:
+        json.dump(override, f, indent=2)
+
+    logger.info(f"Best hours (UTC) this run: {best_hours}")
+    if old_hours is not None and sorted(old_hours) != best_hours:
+        logger.info(f"  (was: {sorted(old_hours)} - CHANGED)")
+    elif old_hours is not None:
+        logger.info("  (unchanged from previous run)")
+    logger.info(f"TRADING_HOURS_OVERRIDE_FILE updated: {TRADING_HOURS_OVERRIDE_FILE}")
+    logger.info("Restart the bot (e.g. pm2 restart ...) for the new hours to take effect.")
+    logger.info("=" * 65)
+
+
+def build_pattern_buckets(labeled: List[Dict]) -> Dict[str, Dict]:
+    """
+    ADDED (user request - calibrate PATTERN_MIN_CONFIDENCE against real
+    outcomes). Same 10-wide bucketing scheme as build_buckets() above, but
+    each bucket ALSO tracks the average reward_pct/risk_pct of its own
+    matches and a resulting expectancy_pct - because pattern trades use
+    each pattern's own measured-move target/invalidation (see
+    run_pattern_calibration_for_symbol above), a bucket's real
+    profitability depends on its own actual reward:risk, not a single
+    fixed breakeven percentage the way the main Tool-5 path's fixed TP/SL
+    allows. expectancy_pct = win_rate*(avg_reward - fee) -
+    (1-win_rate)*(avg_risk + fee), fee = 2*TRADING_FEE_PERCENT (round
+    trip, both sides) - positive means that bucket's setups were
+    genuinely profitable on average in this backtest, after fees;
+    negative means they weren't, regardless of how high the win rate
+    looks in isolation (a bucket can have a >50% win rate and still be
+    unprofitable if its average loss is much bigger than its average win,
+    or vice versa).
+    """
+    buckets: Dict[str, Dict] = {}
+    for b in labeled:
+        score = b["score"]
+        floor = min(int(score // 10) * 10, 90)
+        key = f"{floor}-{floor + 10}"
+        bucket = buckets.setdefault(key, {"wins": 0, "samples": 0, "reward_sum": 0.0, "risk_sum": 0.0})
+        bucket["samples"] += 1
+        if b["won"]:
+            bucket["wins"] += 1
+        bucket["reward_sum"] += b.get("reward_pct", 0.0)
+        bucket["risk_sum"] += b.get("risk_pct", 0.0)
+
+    fee_rt = 2 * TRADING_FEE_PERCENT
+    result: Dict[str, Dict] = {}
+    for key, b in buckets.items():
+        samples = b["samples"]
+        win_rate = round(b["wins"] / samples * 100, 2) if samples else None
+        avg_reward = round(b["reward_sum"] / samples, 3) if samples else None
+        avg_risk = round(b["risk_sum"] / samples, 3) if samples else None
+        expectancy = None
+        if win_rate is not None and avg_reward is not None and avg_risk is not None:
+            wr = win_rate / 100
+            expectancy = round(wr * (avg_reward - fee_rt) - (1 - wr) * (avg_risk + fee_rt), 4)
+        result[key] = {
+            "win_rate": win_rate, "samples": samples,
+            "avg_reward_pct": avg_reward, "avg_risk_pct": avg_risk,
+            "expectancy_pct": expectancy,
+        }
+    return result
+
+
+def select_pattern_min_confidence(pattern_buckets: Dict[str, Dict],
+                                   min_samples: int = PATTERN_MIN_BUCKET_SAMPLES) -> Optional[int]:
+    """
+    Returns the lowest confidence floor F (0-100, step 10) such that EVERY
+    bucket from F up to 90-100 has both enough samples AND positive
+    expectancy_pct - i.e. the lowest threshold PATTERN_MIN_CONFIDENCE
+    could safely be set to (as a >= cutoff, everything at/above it is
+    admitted, so every one of those buckets needs to genuinely clear the
+    bar, not just the single bucket at the boundary). Returns None if even
+    the top 90-100 bucket doesn't qualify, or lacks samples - "nothing
+    trustworthy in this run" rather than a wrong guess.
+    """
+    floors = list(range(90, -1, -10))
+    best_floor = None
+    for floor in floors:
+        key = f"{floor}-{floor + 10}"
+        bucket = pattern_buckets.get(key)
+        if not bucket or bucket.get("samples", 0) < min_samples:
+            break
+        if bucket.get("expectancy_pct") is None or bucket["expectancy_pct"] <= 0:
+            break
+        best_floor = floor
+    return best_floor
+
+
+def write_pattern_calibration_override(pattern_buckets: Dict[str, Dict], months_backtested: int, total_samples: int):
+    """
+    Derives a recommended PATTERN_MIN_CONFIDENCE from pattern_buckets (this
+    run's fresh backtest) and writes it to PATTERN_CALIBRATION_FILE.
+    config.py reads this file at import time and falls back to its
+    hardcoded default (90.0) on anything missing/invalid - see config.py -
+    so, exactly like TRADING_HOURS_OVERRIDE_FILE above, this is purely
+    additive: re-running this script keeps PATTERN_MIN_CONFIDENCE current;
+    never running it (or hitting the safety gate below) leaves whatever
+    was there completely untouched.
+
+    SAFETY GATE: select_pattern_min_confidence() returning None (nothing
+    trustworthy this run - too few samples anywhere, or no confidence
+    tier was genuinely profitable after fees) leaves the override file
+    exactly as it was, with a loud warning instead - never writes a
+    guess. This is the same protective convention write_trading_hours_
+    override() above already uses.
+    """
+    recommended = select_pattern_min_confidence(pattern_buckets)
+
+    logger.info("=" * 65)
+    logger.info("Pattern Engine calibration (all 6 chart patterns, real backtested outcomes):")
+    for floor in range(90, -1, -10):
+        key = f"{floor}-{floor + 10}"
+        b = pattern_buckets.get(key)
+        if not b:
+            continue
+        logger.info(f"  {key:>7}: win_rate={b['win_rate']}%  samples={b['samples']}  "
+                    f"avg_reward={b['avg_reward_pct']}%  avg_risk={b['avg_risk_pct']}%  "
+                    f"expectancy={b['expectancy_pct']}%")
+
+    if recommended is None:
+        logger.warning(
+            f"No confidence tier both had >= {PATTERN_MIN_BUCKET_SAMPLES} samples AND positive "
+            f"expectancy after fees in this run - too little/unreliable pattern-match data to "
+            f"trust for PATTERN_MIN_CONFIDENCE. PATTERN_CALIBRATION_FILE was left UNCHANGED "
+            f"(existing value, if any, still applies). Try a longer --months window, or Pattern "
+            f"Engine's real edge (if any) may simply need more live trades to confirm."
+        )
+        logger.info("=" * 65)
+        return
+
+    old_value = None
+    try:
+        with open(PATTERN_CALIBRATION_FILE, "r") as f:
+            old_value = json.load(f).get("recommended_min_confidence")
+    except Exception:
+        old_value = None
+
+    override = {
+        "generated_at": datetime.utcnow().isoformat(),
+        "months_backtested": months_backtested,
+        "total_samples": total_samples,
+        "min_samples_per_bucket": PATTERN_MIN_BUCKET_SAMPLES,
+        "recommended_min_confidence": recommended,
+        "pattern_buckets": pattern_buckets,
+    }
+    with open(PATTERN_CALIBRATION_FILE, "w") as f:
+        json.dump(override, f, indent=2)
+
+    logger.info(f"Recommended PATTERN_MIN_CONFIDENCE this run: {recommended}")
+    if old_value is not None and old_value != recommended:
+        logger.info(f"  (was: {old_value} - CHANGED)")
+    elif old_value is not None:
+        logger.info("  (unchanged from previous run)")
+    logger.info(f"PATTERN_CALIBRATION_FILE updated: {PATTERN_CALIBRATION_FILE}")
+    logger.info("Restart the bot (e.g. pm2 restart ...) for the new value to take effect.")
+    logger.info("=" * 65)
 
 
 def main():
@@ -535,10 +877,17 @@ def main():
     engine = AnalysisEngine(engine_config)
 
     all_labeled: List[Dict] = []
+    all_pattern_labeled: List[Dict] = []
     for symbol in symbols:
         try:
-            labeled = run_calibration_for_symbol(engine, client, symbol, args.months, correlated_histories)
+            labeled, lower_df = run_calibration_for_symbol(engine, client, symbol, args.months, correlated_histories)
             all_labeled.extend(labeled)
+            # ADDED (user request - calibrate PATTERN_MIN_CONFIDENCE):
+            # reuses the SAME lower_df just fetched above - zero extra
+            # Binance calls for this.
+            if lower_df is not None:
+                pattern_labeled = run_pattern_calibration_for_symbol(lower_df, symbol)
+                all_pattern_labeled.extend(pattern_labeled)
         except Exception as e:
             logger.error(f"{symbol}: calibration failed: {e}")
             continue
@@ -592,6 +941,25 @@ def main():
     for key, b in hour_buckets.items():
         logger.info(f"  {key}: win_rate={b['win_rate']}%  samples={b['samples']}")
     logger.info("=" * 65)
+
+    # ADDED (user request - auto-apply the freshly backtested best hours
+    # to the live TRADING_HOURS_FILTER, instead of a human reading the
+    # log above and hand-editing config.py). See
+    # write_trading_hours_override() for the full reasoning and its
+    # safety gate.
+    write_trading_hours_override(hour_buckets, args.months, len(all_labeled))
+
+    # ADDED (user request - calibrate PATTERN_MIN_CONFIDENCE against real
+    # outcomes, same run, no extra fetching). all_pattern_labeled was
+    # collected above by reusing each symbol's already-fetched lower_df.
+    if all_pattern_labeled:
+        pattern_buckets = build_pattern_buckets(all_pattern_labeled)
+        write_pattern_calibration_override(pattern_buckets, args.months, len(all_pattern_labeled))
+    else:
+        logger.info("=" * 65)
+        logger.info("No pattern-engine matches collected this run (0 samples) - "
+                     "PATTERN_CALIBRATION_FILE left unchanged.")
+        logger.info("=" * 65)
 
 
 if __name__ == "__main__":
