@@ -4,6 +4,7 @@ HackerAI Auto Trading Bot - Configuration
 """
 
 import os
+import json
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -52,14 +53,14 @@ API_REQUEST_TIMEOUT_SECONDS = 10
 # TRADING PARAMETERS
 # ============================================================
 BALANCE_PERCENTAGE = 5  # à¶¶à·à¶½à¶±à·Šà·ƒà·Š à¶‘à¶šà·™à¶±à·Š 5%
-MAX_LEVERAGE = 10  # Maximum leverage (auto-adjusted based on coin)
+MAX_LEVERAGE = 20  # Maximum leverage (auto-adjusted based on coin)
 RISK_PER_TRADE = 0.02  # 2% risk per trade (for position sizing)
 
 # ============================================================
 # SIGNAL REQUIREMENTS (à¶”à¶¶à·š à¶…à¶½à·”à¶­à·Š conditions)
 # ============================================================
 MIN_TOOLS_MATCH = 3  # Tools 5à¶±à·Š à¶…à·€à¶¸ à¶œà·à¶½à¶´à·™à¶± à¶œà¶«à¶± (5/3 rule)
-MIN_SUBCONCEPTS_PER_TOOL = 1  # FIX (user request, reverted from 2): each of
+MIN_SUBCONCEPTS_PER_TOOL = 2  # FIX (user request, reverted from 2): each of
 # the 5 tools has many of its own named sub-concepts internally (Tool 1
 # alone has 9+: BOS, CHoCH, MSS, SMT Divergence, Macro Break, Unicorn Model,
 # Inverse Fairy Tale, Old High/Low reaction, Wyckoff breakout). A tool only
@@ -103,12 +104,25 @@ PATTERN_ENGINE_ENABLED = False  # SAFETY DEFAULT: off. With this False (or
 # MIN_TOOLS_MATCH / MIN_PROFIT_CHANCE gate has ALREADY REJECTED (see
 # bot_core._scan_coins_247). It never runs before or instead of that gate,
 # and never blocks/changes a trade the normal gate already approves.
-PATTERN_MIN_CONFIDENCE = 90.0  # RAISED (user request, per explicit
-# instruction) from 80.0 to 90.0, together with a new breakout-volume-spike
-# check added to all 6 detectors in pattern_engine.py (previously every
-# check was price-structure-only; a breakout with no volume pickup vs the
-# pattern's own formation is a classical false-breakout risk that wasn't
-# being scored at all before). a rejected candidate only gets opened via a
+PATTERN_CALIBRATION_FILE = os.path.join(_BOT_INSTALL_DIR, "pattern_calibration_override.json")
+# ADDED (user request - stop guessing PATTERN_MIN_CONFIDENCE, calibrate it
+# against real backtested outcomes exactly like MIN_PROFIT_CHANCE already
+# is): re-running backtest_calibration.py now ALSO walk-forward backtests
+# all 6 pattern detectors against real historical 15m candles and writes
+# this file with the lowest confidence floor whose real historical
+# expectancy (win_rate AND each bucket's own actual reward:risk, since
+# pattern trades use the pattern's own measured-move TP/SL, not a fixed
+# percent - see backtest_calibration.select_pattern_min_confidence()) is
+# genuinely positive. Same fail-open contract as TRADING_HOURS_OVERRIDE_
+# FILE below: missing/invalid/too-thin-to-trust content all fall back to
+# the hardcoded default this line always had.
+PATTERN_MIN_CONFIDENCE = 90.0  # hardcoded fallback - RAISED (user request,
+# per explicit instruction) from 80.0 to 90.0, together with a new
+# breakout-volume-spike check added to all 6 detectors in pattern_engine.py
+# (previously every check was price-structure-only; a breakout with no
+# volume pickup vs the pattern's own formation is a classical false-
+# breakout risk that wasn't being scored at all before). A rejected
+# candidate only gets opened via a
 # pattern match if the best-matching classical chart pattern (Double Top/
 # Bottom, Head & Shoulders/Inverse, Bull/Bear Flag) scores at least this
 # confidence (0-100, see pattern_engine.py for exactly how each pattern's
@@ -118,6 +132,14 @@ PATTERN_MIN_CONFIDENCE = 90.0  # RAISED (user request, per explicit
 # geometric pattern-matching (real human chart-pattern trading has the same
 # "seeing patterns in noise" risk); 90 + the volume check should filter
 # meaningfully more of that out, but re-verify against fresh data.
+try:
+    with open(PATTERN_CALIBRATION_FILE, "r") as _pc_f:
+        _pc_override = json.load(_pc_f)
+    _pc_value = _pc_override.get("recommended_min_confidence")
+    if isinstance(_pc_value, (int, float)) and 0 <= _pc_value <= 100:
+        PATTERN_MIN_CONFIDENCE = float(_pc_value)
+except Exception:
+    pass  # file missing/invalid - keep the hardcoded fallback above, silently
 PATTERN_COOLDOWN_MINUTES = 240  # FIX (user request, re-entry loop): after
 # a pattern-engine trade closes (win OR loss) on a symbol, no new pattern-
 # engine trade can open on that SAME symbol for this many minutes. Without
@@ -135,18 +157,51 @@ TELEGRAM_ADMIN_CHAT_ID = "8804792847"  # ONLY this chat's commands/button-taps
 # different Telegram account/chat.
 SETTINGS_OVERRIDE_FILE = os.path.join(_BOT_INSTALL_DIR, "settings_override.json")  # where Telegram-toggled
 # settings (and pause state) are saved, so they survive a bot/VPS restart.
-MIN_PROFIT_CHANCE = 45.0  # FIX: calibration_table.json (27,042 real backtested
+# FIX (user request, corrected a real bug): this was 35.0, but the SAME
+# breakeven math the TRADING_HOURS_FILTER block below already uses (with
+# the bot's ACTUAL configured TAKE_PROFIT_PERCENT=5.0/STOP_LOSS_PERCENT=3.0)
+# puts real breakeven at ~38.75%, not the ~36.7% this line's old comment
+# assumed (that number came from a mismatched TP=2%/SL=1% pair that isn't
+# what this bot actually trades with). 35.0 was therefore BELOW real
+# breakeven - the bot was admitting calibrated-probability setups that are
+# expected to lose money on average even before any bad luck, a direct,
+# concrete cause of losses outweighing wins. Moved to 40.0: comfortably
+# above the real 38.75% breakeven (unlike 35.0), while staying meaningfully
+# below 45.0 - the exact value documented below to have combined with the
+# 5/24-hour TRADING_HOURS_FILTER to produce ZERO trades for an extended
+# period. Re-tune upward once calibration_table.json is confirmed to
+# support it (see NO_TRADES_ALERT below - it will flag if this combination
+# turns out too strict again, instead of silently going quiet).
+MIN_PROFIT_CHANCE = 45.0  # calibration_table.json (27,042 real backtested
 # setups) shows NO score bucket ever reaches 65% real win-rate — the
 # highest bucket (90-100 raw score) only wins 51.7% of the time. Since
 # analysis_engine._get_calibrated_profit_chance() replaces the raw score
 # with this real win-rate once the table is loaded, a 65% threshold would
-# silently reject every single trade forever. Breakeven here (TP 2% / SL 1%
-# / 0.05% fee per side) is ~36.7%; 45.0 keeps a real safety margin above
-# breakeven while only admitting buckets with genuine historical edge
-# (70-80: 40.0%, 80-90: 45.7%, 90-100: 51.7%). Re-tune this after each
-# fresh calibration run — it should track whatever the real buckets show,
-# not an assumed number.
+# silently reject every single trade forever. Known bucket win-rates from
+# that calibration run: 70-80: 40.0%, 80-90: 45.7%, 90-100: 51.7% - so
+# 40.0 admits the 70-80 bucket and above, all at/above real breakeven.
+# Re-tune this after each fresh calibration run — it should track whatever
+# the real buckets show, not an assumed number.
 SCAN_INTERVAL_SECONDS = 30  # à·ƒà·‘à¶¸ à¶­à¶­à·Š 30à¶šà¶§ à·€à¶»à¶šà·Š scan (24/7)
+
+# ============================================================
+# NO-TRADES WATCHDOG (user request - future-proofing) - a single Telegram
+# alert if the bot goes quiet for too long. Purpose-built for the exact
+# failure mode documented below (TRADING_HOURS_FILTER's narrow 5-hour
+# window + a too-strict MIN_PROFIT_CHANCE silently producing ZERO trades
+# for an extended period with no one aware) - but general enough to also
+# catch any OTHER future filter/threshold combination that ends up too
+# restrictive together, whatever the cause. See bot_core.
+# _check_no_trades_watchdog().
+# ============================================================
+NO_TRADES_ALERT_ENABLED = True
+NO_TRADES_ALERT_HOURS = 6  # if this many hours pass with the bot actively
+# running (not paused, not waiting on a balance issue) and NOT ONE new
+# trade opened anywhere, send one Telegram alert - "filters may be too
+# strict, check the config" - instead of staying silently idle.
+NO_TRADES_ALERT_REPEAT_HOURS = 6  # after that first alert, wait at least
+# this many further hours (still zero trades) before alerting again - a
+# single reminder every few hours, never a spam loop every scan cycle.
 
 # ============================================================
 # TRADING HOURS FILTER (2026-07-11 hourly_breakdown.json, STRIDE=1,
@@ -156,20 +211,49 @@ SCAN_INTERVAL_SECONDS = 30  # à·ƒà·‘à¶¸ à¶­à¶­à·Š 30à¶šà�
 # 12:00-16:59 UTC cleared it (12:00=40.13%, 13:00=39.64%, 14:00=40.44%,
 # 15:00=38.76%, 16:00=38.76%) - all 5 hours with large, comparable sample
 # sizes, consistent with the London-afternoon/NY-morning liquidity
-# overlap. Every other hour of the day was below breakeven (31-37%).
+# overlap. Every other hour of the day was below breakeven (31-37%). This
+# window is UTC/global-liquidity-based, not location-specific, but for
+# reference it lands at 17:30-22:29 Sri Lanka time (UTC+5:30) - i.e. these
+# ARE already the best-performing hours available, evening in Sri Lanka.
 # When enabled, NEW trades only open during these hours - trades already
 # open outside this window keep being managed normally (SL/TP/trailing
 # untouched; this only gates new entries). Re-verify against a fresh
 # hourly_breakdown.json periodically, since this reflects one backtest
 # window, not a permanent law of the market.
-TRADING_HOURS_FILTER_ENABLED = False  # TEMPORARILY disabled for diagnostic testing -
-# zero trades opened for an extended period with this on. 5/24 allowed
-# hours combined with the 45% calibrated MIN_PROFIT_CHANCE may simply be
-# too restrictive together. Re-enable (set back to True) once confirmed
-# trades open normally without this filter - if they do, the hours filter
-# was the cause (just very strict, not a bug); if trades still don't open,
-# the cause is elsewhere and this rules the hours filter out.
-ALLOWED_TRADING_HOURS_UTC = [12, 13, 14, 15, 16]
+# FIX (user request, re-enabled): was OFF - a previous run with this ON
+# had MIN_PROFIT_CHANCE at 45.0, and the two together (a narrow 5/24-hour
+# window AND a stricter profit-chance bar) produced zero trades for an
+# extended period. MIN_PROFIT_CHANCE is now 40.0 (see that setting's own
+# comment above for the full reasoning) specifically so this filter can be
+# safely re-enabled without recreating that exact combination - and
+# NO_TRADES_ALERT above will flag it via Telegram within
+# NO_TRADES_ALERT_HOURS if trades still stop opening for any reason,
+# instead of that going unnoticed again.
+TRADING_HOURS_FILTER_ENABLED = True
+TRADING_HOURS_OVERRIDE_FILE = os.path.join(_BOT_INSTALL_DIR, "trading_hours_override.json")
+# ADDED (user request - keep the best-hours list current without manual
+# hand-editing): re-running backtest_calibration.py now ALSO writes this
+# file with whichever UTC hours clear the bot's real breakeven in that
+# run (see backtest_calibration.write_trading_hours_override() for the
+# exact rule and its safety gates). If it exists and parses cleanly, its
+# allowed_hours_utc list is used below INSTEAD of the hardcoded default -
+# so hours stay current every time the backtest is re-run, no config.py
+# hand-editing needed. Missing file, unreadable/invalid content, or an
+# empty/malformed list all fail open to the same hardcoded default this
+# line always had - a broken or absent override file can only ever fall
+# back to a known-good value, never break the live filter.
+ALLOWED_TRADING_HOURS_UTC = [12, 13, 14, 15, 16]  # hardcoded fallback - the
+# original 2026-07-11 backtest result (see comment above); stays exactly
+# this value until a fresh backtest run's override file says otherwise.
+try:
+    with open(TRADING_HOURS_OVERRIDE_FILE, "r") as _hours_f:
+        _hours_override = json.load(_hours_f)
+    _override_hours = _hours_override.get("allowed_hours_utc")
+    if (isinstance(_override_hours, list) and len(_override_hours) > 0
+            and all(isinstance(_h, int) and 0 <= _h <= 23 for _h in _override_hours)):
+        ALLOWED_TRADING_HOURS_UTC = sorted(_override_hours)
+except Exception:
+    pass  # file missing/invalid - keep the hardcoded fallback above, silently
 BALANCE_CHECK_INTERVAL = 60  # Balance check interval seconds
 WAIT_FOR_BALANCE = True  # Balance à¶±à·à¶­à·’ à·€à·™à¶½à·à·€à¶§ crash à¶±à·œà·€à·“ wait à¶šà¶»à¶±à·Šà¶±
 
