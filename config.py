@@ -172,7 +172,7 @@ SETTINGS_OVERRIDE_FILE = os.path.join(_BOT_INSTALL_DIR, "settings_override.json"
 # period. Re-tune upward once calibration_table.json is confirmed to
 # support it (see NO_TRADES_ALERT below - it will flag if this combination
 # turns out too strict again, instead of silently going quiet).
-MIN_PROFIT_CHANCE = 45.0  # calibration_table.json (27,042 real backtested
+MIN_PROFIT_CHANCE = 38.0  # calibration_table.json (27,042 real backtested
 # setups) shows NO score bucket ever reaches 65% real win-rate — the
 # highest bucket (90-100 raw score) only wins 51.7% of the time. Since
 # analysis_engine._get_calibrated_profit_chance() replaces the raw score
