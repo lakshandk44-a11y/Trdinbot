@@ -1,0 +1,619 @@
+"""
+HackerAI Auto Trading Bot - Configuration
+à¶”à¶¶à¶œà·š Binance API, Discord Webhook, News API settings
+"""
+
+import os
+import json
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# ============================================================
+# BOT INSTALL DIRECTORY (FIX: eliminate an entire class of "relative
+# path breaks on restart" bugs across every state/settings/cache file)
+# ============================================================
+# BUG FIX (user-reported, confirmed via live logs/screenshots):
+# TRADE_STATE_FILE, SETTINGS_OVERRIDE_FILE, and CALIBRATION_TABLE_FILE
+# all previously defaulted to bare relative filenames. A relative path
+# resolves against the process's CURRENT WORKING DIRECTORY at the
+# moment it's opened - not guaranteed to be the same directory every
+# time PM2 or a VPS reboot relaunches the bot. Every file-path default
+# below is now built from THIS config.py file's own directory (a
+# fixed, stable location), so every restart reliably finds the exact
+# same files regardless of what directory the process launches from.
+_BOT_INSTALL_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# ============================================================
+# BINANCE API CONFIGURATION
+# ============================================================
+BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "YOUR_BINANCE_API_KEY_HERE")
+BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "YOUR_BINANCE_API_SECRET_HERE")
+BINANCE_TESTNET = True  # True for testnet, False for real account
+
+# BUG FIX (user-reported): every HTTP call the bot makes to Binance
+# (klines, funding rate, open interest, leverage changes, order
+# placement, everything) previously had NO timeout at all - Python's
+# requests library waits FOREVER by default if Binance (or the network
+# path to it) goes slow/unresponsive, meaning a single stalled request
+# could silently freeze the entire bot indefinitely, with no error, no
+# log, no recovery - just a hung process an operator has to notice and
+# manually restart. 10 seconds is a common, well-tested default for
+# exchange API calls (matches what several popular trading libraries
+# default to) - long enough to tolerate normal network jitter or a
+# briefly busy Binance endpoint, short enough that a genuinely stuck
+# request fails fast and cleanly instead of hanging. Every call site
+# that uses this already has its own try/except Exception (verified
+# for every one of them before this change), so a timeout now surfaces
+# as a normal, already-handled error - retried on the next scan cycle
+# like any other transient API failure - never a bot-wide freeze.
+API_REQUEST_TIMEOUT_SECONDS = 10
+
+# ============================================================
+# TRADING PARAMETERS
+# ============================================================
+BALANCE_PERCENTAGE = 5  # à¶¶à·à¶½à¶±à·Šà·ƒà·Š à¶‘à¶šà·™à¶±à·Š 5%
+MAX_LEVERAGE = 20  # Maximum leverage (auto-adjusted based on coin)
+RISK_PER_TRADE = 0.02  # 2% risk per trade (for position sizing)
+
+# ============================================================
+# SIGNAL REQUIREMENTS (à¶”à¶¶à·š à¶…à¶½à·”à¶­à·Š conditions)
+# ============================================================
+MIN_TOOLS_MATCH = 3  # Tools 5à¶±à·Š à¶…à·€à¶¸ à¶œà·à¶½à¶´à·™à¶± à¶œà¶«à¶± (5/3 rule)
+MIN_SUBCONCEPTS_PER_TOOL = 2  # FIX (user request, reverted from 2): each of
+# the 5 tools has many of its own named sub-concepts internally (Tool 1
+# alone has 9+: BOS, CHoCH, MSS, SMT Divergence, Macro Break, Unicorn Model,
+# Inverse Fairy Tale, Old High/Low reaction, Wyckoff breakout). A tool only
+# counts as "agreeing" toward MIN_TOOLS_MATCH if at least this many of its
+# own sub-concepts agree on the same direction at the same time.
+# NOTE: this was set to 2 for a while, but combined with MIN_TOOLS_MATCH=4
+# AND requiring ALL 3 timeframes (4h/1h/15m) to independently clear that bar,
+# a full 9-month/50-coin calibration backtest came back with ZERO qualifying
+# setups on ANY coin - the combination was too strict for real market data.
+# Reverted to 1 (a tool agrees as soon as ANY one of its own sub-concepts
+# fires) so MIN_TOOLS_MATCH=4 and the 3-timeframe rule are the only strict
+# filters left - same as before MIN_SUBCONCEPTS_PER_TOOL was introduced.
+
+STRONG_SUBCONCEPTS_PER_TOOL = 2  # FIX (user request): a SECOND, independent
+# entry path, alongside (not instead of) the normal MIN_TOOLS_MATCH-on-all-
+# 3-timeframes rule above. If ANY ONE of the 3 timeframes (4h/1h/15m) on its
+# OWN has at least STRONG_TOOLS_MATCH tools where each of THOSE tools has at
+# least this many (STRONG_SUBCONCEPTS_PER_TOOL) of its own sub-concepts
+# agreeing - a trade opens right there, without needing the other 2
+# timeframes to also confirm. Meant to catch a single very-strong timeframe
+# setup that the stricter "all 3 timeframes" rule would otherwise block.
+ENABLE_SINGLE_TF_STRONG_ENTRY = False  # FIX (user request): turns Path A
+# (a single very-strong timeframe alone can open a trade, without the other
+# 2 timeframes confirming - see analysis_engine._weighted_mtf_decision)
+# OFF. With this False, ONLY the original rule applies: all 3 timeframes
+# (4h/1h/15m) must EACH independently have >= MIN_TOOLS_MATCH tools
+# agreeing, in the same direction - exactly the behavior before Path A was
+# added. Set back to True to re-enable Path A as an additional, alternate
+# way to open a trade alongside the all-3-timeframes rule.
+STRONG_TOOLS_MATCH = 4  # how many tools (out of 5) must each independently
+# clear STRONG_SUBCONCEPTS_PER_TOOL, on a single timeframe, for this
+# alternate path to fire.
+
+# ============================================================
+# PATTERN RECOGNITION ENGINE (user request, Phase 1 - 6 patterns)
+# ============================================================
+PATTERN_ENGINE_ENABLED = False  # SAFETY DEFAULT: off. With this False (or
+# pattern_engine.py deleted entirely), the bot's existing scan/decision/
+# execute path is 100% unaffected - this is a completely separate, opt-in
+# "second opinion" checked ONLY for a candidate that the normal Tool 5 /
+# MIN_TOOLS_MATCH / MIN_PROFIT_CHANCE gate has ALREADY REJECTED (see
+# bot_core._scan_coins_247). It never runs before or instead of that gate,
+# and never blocks/changes a trade the normal gate already approves.
+PATTERN_CALIBRATION_FILE = os.path.join(_BOT_INSTALL_DIR, "pattern_calibration_override.json")
+# ADDED (user request - stop guessing PATTERN_MIN_CONFIDENCE, calibrate it
+# against real backtested outcomes exactly like MIN_PROFIT_CHANCE already
+# is): re-running backtest_calibration.py now ALSO walk-forward backtests
+# all 6 pattern detectors against real historical 15m candles and writes
+# this file with the lowest confidence floor whose real historical
+# expectancy (win_rate AND each bucket's own actual reward:risk, since
+# pattern trades use the pattern's own measured-move TP/SL, not a fixed
+# percent - see backtest_calibration.select_pattern_min_confidence()) is
+# genuinely positive. Same fail-open contract as TRADING_HOURS_OVERRIDE_
+# FILE below: missing/invalid/too-thin-to-trust content all fall back to
+# the hardcoded default this line always had.
+PATTERN_MIN_CONFIDENCE = 90.0  # hardcoded fallback - RAISED (user request,
+# per explicit instruction) from 80.0 to 90.0, together with a new
+# breakout-volume-spike check added to all 6 detectors in pattern_engine.py
+# (previously every check was price-structure-only; a breakout with no
+# volume pickup vs the pattern's own formation is a classical false-
+# breakout risk that wasn't being scored at all before). A rejected
+# candidate only gets opened via a
+# pattern match if the best-matching classical chart pattern (Double Top/
+# Bottom, Head & Shoulders/Inverse, Bull/Bear Flag) scores at least this
+# confidence (0-100, see pattern_engine.py for exactly how each pattern's
+# score is built). NOTE: tested against pure random-walk data, ~24% of
+# random noise still scored >=80% on at least one of the 6 patterns at the
+# old 80 threshold/old scoring - this is a known limitation of pure
+# geometric pattern-matching (real human chart-pattern trading has the same
+# "seeing patterns in noise" risk); 90 + the volume check should filter
+# meaningfully more of that out, but re-verify against fresh data.
+try:
+    with open(PATTERN_CALIBRATION_FILE, "r") as _pc_f:
+        _pc_override = json.load(_pc_f)
+    _pc_value = _pc_override.get("recommended_min_confidence")
+    if isinstance(_pc_value, (int, float)) and 0 <= _pc_value <= 100:
+        PATTERN_MIN_CONFIDENCE = float(_pc_value)
+except Exception:
+    pass  # file missing/invalid - keep the hardcoded fallback above, silently
+PATTERN_COOLDOWN_MINUTES = 240  # FIX (user request, re-entry loop): after
+# a pattern-engine trade closes (win OR loss) on a symbol, no new pattern-
+# engine trade can open on that SAME symbol for this many minutes. Without
+# this, the exact same pattern (same swing points, barely-changed price
+# structure) could re-trigger a new trade on the very next scan (30s later)
+# right after a losing close, repeatedly re-losing on the same setup. Does
+# NOT affect normal Tool-5 trades on the same symbol at all.
+
+# ============================================================
+# TELEGRAM REMOTE CONTROL (user request)
+# ============================================================
+TELEGRAM_ADMIN_CHAT_ID = "8804792847"  # ONLY this chat's commands/button-taps
+# are accepted by telegram_control.py - anyone else messaging the bot is
+# silently ignored. Change this if you ever need to control the bot from a
+# different Telegram account/chat.
+SETTINGS_OVERRIDE_FILE = os.path.join(_BOT_INSTALL_DIR, "settings_override.json")  # where Telegram-toggled
+# settings (and pause state) are saved, so they survive a bot/VPS restart.
+# FIX (user request, corrected a real bug): this was 35.0, but the SAME
+# breakeven math the TRADING_HOURS_FILTER block below already uses (with
+# the bot's ACTUAL configured TAKE_PROFIT_PERCENT=5.0/STOP_LOSS_PERCENT=3.0)
+# puts real breakeven at ~38.75%, not the ~36.7% this line's old comment
+# assumed (that number came from a mismatched TP=2%/SL=1% pair that isn't
+# what this bot actually trades with). 35.0 was therefore BELOW real
+# breakeven - the bot was admitting calibrated-probability setups that are
+# expected to lose money on average even before any bad luck, a direct,
+# concrete cause of losses outweighing wins. Moved to 40.0: comfortably
+# above the real 38.75% breakeven (unlike 35.0), while staying meaningfully
+# below 45.0 - the exact value documented below to have combined with the
+# 5/24-hour TRADING_HOURS_FILTER to produce ZERO trades for an extended
+# period. Re-tune upward once calibration_table.json is confirmed to
+# support it (see NO_TRADES_ALERT below - it will flag if this combination
+# turns out too strict again, instead of silently going quiet).
+MIN_PROFIT_CHANCE = 45.0  # calibration_table.json (27,042 real backtested
+# setups) shows NO score bucket ever reaches 65% real win-rate — the
+# highest bucket (90-100 raw score) only wins 51.7% of the time. Since
+# analysis_engine._get_calibrated_profit_chance() replaces the raw score
+# with this real win-rate once the table is loaded, a 65% threshold would
+# silently reject every single trade forever. Known bucket win-rates from
+# that calibration run: 70-80: 40.0%, 80-90: 45.7%, 90-100: 51.7% - so
+# 40.0 admits the 70-80 bucket and above, all at/above real breakeven.
+# Re-tune this after each fresh calibration run — it should track whatever
+# the real buckets show, not an assumed number.
+SCAN_INTERVAL_SECONDS = 30  # à·ƒà·‘à¶¸ à¶­à¶­à·Š 30à¶šà¶§ à·€à¶»à¶šà·Š scan (24/7)
+
+# ============================================================
+# NO-TRADES WATCHDOG (user request - future-proofing) - a single Telegram
+# alert if the bot goes quiet for too long. Purpose-built for the exact
+# failure mode documented below (TRADING_HOURS_FILTER's narrow 5-hour
+# window + a too-strict MIN_PROFIT_CHANCE silently producing ZERO trades
+# for an extended period with no one aware) - but general enough to also
+# catch any OTHER future filter/threshold combination that ends up too
+# restrictive together, whatever the cause. See bot_core.
+# _check_no_trades_watchdog().
+# ============================================================
+NO_TRADES_ALERT_ENABLED = True
+NO_TRADES_ALERT_HOURS = 6  # if this many hours pass with the bot actively
+# running (not paused, not waiting on a balance issue) and NOT ONE new
+# trade opened anywhere, send one Telegram alert - "filters may be too
+# strict, check the config" - instead of staying silently idle.
+NO_TRADES_ALERT_REPEAT_HOURS = 6  # after that first alert, wait at least
+# this many further hours (still zero trades) before alerting again - a
+# single reminder every few hours, never a spam loop every scan cycle.
+
+# ============================================================
+# TRADING HOURS FILTER (2026-07-11 hourly_breakdown.json, STRIDE=1,
+# full 24h coverage, 64,359 setups, ~2,500-2,900 samples per hour)
+# ============================================================
+# Breakeven with TP=5%/SL=3%/0.1% round-trip fee is ~38.75%. Only
+# 12:00-16:59 UTC cleared it (12:00=40.13%, 13:00=39.64%, 14:00=40.44%,
+# 15:00=38.76%, 16:00=38.76%) - all 5 hours with large, comparable sample
+# sizes, consistent with the London-afternoon/NY-morning liquidity
+# overlap. Every other hour of the day was below breakeven (31-37%). This
+# window is UTC/global-liquidity-based, not location-specific, but for
+# reference it lands at 17:30-22:29 Sri Lanka time (UTC+5:30) - i.e. these
+# ARE already the best-performing hours available, evening in Sri Lanka.
+# When enabled, NEW trades only open during these hours - trades already
+# open outside this window keep being managed normally (SL/TP/trailing
+# untouched; this only gates new entries). Re-verify against a fresh
+# hourly_breakdown.json periodically, since this reflects one backtest
+# window, not a permanent law of the market.
+# FIX (user request, re-enabled): was OFF - a previous run with this ON
+# had MIN_PROFIT_CHANCE at 45.0, and the two together (a narrow 5/24-hour
+# window AND a stricter profit-chance bar) produced zero trades for an
+# extended period. MIN_PROFIT_CHANCE is now 40.0 (see that setting's own
+# comment above for the full reasoning) specifically so this filter can be
+# safely re-enabled without recreating that exact combination - and
+# NO_TRADES_ALERT above will flag it via Telegram within
+# NO_TRADES_ALERT_HOURS if trades still stop opening for any reason,
+# instead of that going unnoticed again.
+TRADING_HOURS_FILTER_ENABLED = True
+TRADING_HOURS_OVERRIDE_FILE = os.path.join(_BOT_INSTALL_DIR, "trading_hours_override.json")
+# ADDED (user request - keep the best-hours list current without manual
+# hand-editing): re-running backtest_calibration.py now ALSO writes this
+# file with whichever UTC hours clear the bot's real breakeven in that
+# run (see backtest_calibration.write_trading_hours_override() for the
+# exact rule and its safety gates). If it exists and parses cleanly, its
+# allowed_hours_utc list is used below INSTEAD of the hardcoded default -
+# so hours stay current every time the backtest is re-run, no config.py
+# hand-editing needed. Missing file, unreadable/invalid content, or an
+# empty/malformed list all fail open to the same hardcoded default this
+# line always had - a broken or absent override file can only ever fall
+# back to a known-good value, never break the live filter.
+ALLOWED_TRADING_HOURS_UTC = [12, 13, 14, 15, 16]  # hardcoded fallback - the
+# original 2026-07-11 backtest result (see comment above); stays exactly
+# this value until a fresh backtest run's override file says otherwise.
+try:
+    with open(TRADING_HOURS_OVERRIDE_FILE, "r") as _hours_f:
+        _hours_override = json.load(_hours_f)
+    _override_hours = _hours_override.get("allowed_hours_utc")
+    if (isinstance(_override_hours, list) and len(_override_hours) > 0
+            and all(isinstance(_h, int) and 0 <= _h <= 23 for _h in _override_hours)):
+        ALLOWED_TRADING_HOURS_UTC = sorted(_override_hours)
+except Exception:
+    pass  # file missing/invalid - keep the hardcoded fallback above, silently
+BALANCE_CHECK_INTERVAL = 60  # Balance check interval seconds
+WAIT_FOR_BALANCE = True  # Balance à¶±à·à¶­à·’ à·€à·™à¶½à·à·€à¶§ crash à¶±à·œà·€à·“ wait à¶šà¶»à¶±à·Šà¶±
+
+# ============================================================
+# TOP 40 COINS (Binance USDT Perpetual Futures)
+# ============================================================
+TOP_N_COIN_COUNT = 50  # FIX (user request, was 40): how many coins the live
+# top-by-volume fetch (bot_core._get_top_coins) pulls from Binance each scan.
+# TOP_N_COINS below is only the STATIC FALLBACK list used if that live fetch
+# fails entirely - it's kept the same length (50) so the fallback behaves
+# identically to the normal (live) path either way.
+TOP_N_COINS = [
+    "BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT",
+    "SOLUSDT", "DOGEUSDT", "DOTUSDT", "MATICUSDT", "1000SHIBUSDT",  # FIX: SHIBUSDT doesn't exist on Binance Futures - it's listed as 1000SHIBUSDT
+    "AVAXUSDT", "LINKUSDT", "UNIUSDT", "ATOMUSDT", "LTCUSDT",
+    "ETCUSDT", "XLMUSDT", "BCHUSDT", "ALGOUSDT", "VETUSDT",
+    "FILUSDT", "TRXUSDT", "NEARUSDT", "SANDUSDT", "MANAUSDT",
+    "APEUSDT", "AXSUSDT", "THETAUSDT", "FTMUSDT", "EGLDUSDT",
+    "HBARUSDT", "ICPUSDT", "XMRUSDT", "EOSUSDT", "AAVEUSDT",
+    "CAKEUSDT", "KLAYUSDT", "ARUSDT", "CRVUSDT", "GRTUSDT",
+    # FIX (user request): 10 more added to go from 40 -> 50. Same rule as the
+    # rest of this list - all are commonly-listed, liquid Binance USDT-M
+    # futures pairs - but since this is only a fallback (the live top-by-
+    # volume fetch is what actually runs every scan), double-check each
+    # symbol is still listed on your account's Binance Futures before
+    # relying on this fallback path.
+    "OPUSDT", "ARBUSDT", "SUIUSDT", "APTUSDT", "INJUSDT",
+    "RUNEUSDT", "DYDXUSDT", "LDOUSDT", "STXUSDT", "GALAUSDT",
+]
+
+# ============================================================
+# TIMEFRAMES (Best 3 Timeframes)
+# ============================================================
+TIMEFRAMES = {
+    "higher": "4h",    # Higher timeframe (trend direction)
+    "medium": "1h",    # Medium timeframe (confirmation)
+    "lower": "15m"     # Lower timeframe (entry execution)
+}
+
+# ============================================================
+# ANALYSIS TOOLS (5 Tools)
+# ============================================================
+ANALYSIS_TOOLS = {
+    "ict_smc": True,           # Tool 1: ICT/Smart Money Concepts
+    "fvg": True,               # Tool 2: Fair Value Gap
+    "order_block": True,       # Tool 3: Order Blocks
+    "liquidity": True,         # Tool 4: Liquidity Sweeps
+    "market_structure": True   # Tool 5: Market Structure (BOS/CHoCH)
+}
+
+# ============================================================
+# TOOL 1 (ICT/SMC) - EXTENDED CONCEPTS
+# SMT Divergence, Kill Zones, Macro Structure, Unicorn Model,
+# Inverse Fairy Tale, Old Highs/Lows, Accumulation/Distribution.
+# All purely additive to Tool 1 - if a fetch below ever fails, the
+# relevant sub-feature just doesn't trigger that scan; nothing else
+# in the bot is affected (see bot_core._fetch_multi_timeframe).
+# ============================================================
+SMT_DIVERGENCE_ENABLED = True   # fetch a correlated symbol's candles for SMT Divergence
+
+# ADDED (user request): fetches this coin's current funding rate once per
+# scan and folds it into the profit_chance score as a crowded-positioning
+# check (see AnalysisEngine._calculate_profit_chance) - purely additive,
+# same pattern as SMT_DIVERGENCE_ENABLED above. Set False to disable.
+FUNDING_RATE_ENABLED = True
+
+# ============================================================
+# OPEN INTEREST CONFLUENCE — professional-trader-style positioning signal
+# ============================================================
+# Fetches Binance's own Open Interest history for the symbol being
+# scanned (GET /futures/data/openInterestHist - real, live exchange
+# data, no third-party service) and checks whether OI is moving in the
+# SAME direction as the current tool-vote lean. Rising OI alongside the
+# move means genuinely NEW positions are being opened (real conviction
+# behind it); falling OI alongside the move means the move is being
+# driven by EXISTING positions closing (short covering on a rally, long
+# liquidation on a selloff) - a classic "this move may run out of
+# steam" warning. Purely additive, exactly like FUNDING_RATE_ENABLED
+# above - folds into AnalysisEngine._calculate_profit_chance as a score
+# adjustment only. Never gates/blocks a trade by itself, never touches
+# the 5-tool voting (MIN_TOOLS_MATCH) - it only ever nudges the
+# confidence score for a signal the 5 tools have already produced.
+# Stateless (recomputed fresh every scan, nothing persisted) - toggle
+# ON/OFF live from Telegram /menu, no restart needed.
+OI_CONFLUENCE_ENABLED    = True
+OI_HISTORY_PERIOD        = "15m"  # granularity of OI history (matches TIMEFRAMES["lower"])
+OI_HISTORY_LOOKBACK      = 20     # number of OI readings to compare (20 x 15m ≈ 5 hours)
+OI_CHANGE_THRESHOLD_PCT  = 1.5    # minimum OI % change considered a meaningful shift
+
+# ADDED (user request): daily realized-loss limit. Purely local, no extra
+# API calls - see TradeManager.record_realized_loss/is_daily_loss_limit_
+# reached in trade_manager.py. Resets automatically at the next calendar
+# day, survives bot restarts (persisted in trade_state.json), and only
+# ever counts realized losses from trades that actually CLOSED - never an
+# open/still-running trade's unrealized PnL. Toggle from Telegram /menu.
+DAILY_LOSS_LIMIT_ENABLED = True
+DAILY_LOSS_LIMIT_USDT = 20.0   # change this $ amount to whatever fits your account size
+
+# ============================================================
+# SMART HOURS GUARD  —  auto-learn & block historically bad hours
+# ============================================================
+SMART_HOURS_GUARD_ENABLED        = True
+SMART_HOURS_LOOKBACK_DAYS        = 30     # days of history to analyse
+SMART_HOURS_REANALYZE_DAYS       = 3      # how often to rebuild the bad-hours list
+SMART_HOURS_MIN_TOTAL_TRADES     = 20     # minimum total recent trades before any blocking
+SMART_HOURS_MIN_SAMPLES          = 4      # minimum trades per hour to classify it
+SMART_HOURS_MIN_SPREAD_DAYS      = 2      # losses must span this many different calendar days
+SMART_HOURS_LOSS_RATE_THRESHOLD  = 0.70   # weighted loss rate threshold (0.70 = 70 %)
+
+# ============================================================
+# VOLATILITY GUARD — real-time, per-symbol volatility spike detector
+# ============================================================
+# Blocks NEW entries on a symbol when its CURRENT volatility (ATR) is
+# abnormally elevated relative to its OWN recent history - independent
+# of Smart Hours Guard (which looks at historical hour-of-day patterns,
+# not real-time conditions). Deliberately STATELESS: recomputed fresh
+# from the same OHLC candles already fetched for analysis on every
+# check, so there is nothing to persist and therefore nothing that can
+# be lost or go stale across a bot/VPS restart.
+#
+# HOW IT DECIDES:
+#   current_ATR  = ATR(VOLATILITY_GUARD_ATR_PERIOD) on the most recent
+#                  closed candle of VOLATILITY_GUARD_TIMEFRAME.
+#   baseline_ATR = average ATR over the preceding
+#                  VOLATILITY_GUARD_BASELINE_CANDLES candles.
+#   ratio = current_ATR / baseline_ATR
+#   ratio >= VOLATILITY_GUARD_RATIO_THRESHOLD -> block new entries on
+#   THIS symbol only, THIS check only. Already-open trades (on any
+#   symbol) are never affected - SL/TP/trailing continue managing them
+#   exactly as before.
+#
+# Fails OPEN (does not block) whenever there isn't enough candle
+# history yet to compute a reliable ratio - never blocks on
+# uncertainty. Toggle ON/OFF live from Telegram /menu, no restart
+# needed.
+VOLATILITY_GUARD_ENABLED           = True
+VOLATILITY_GUARD_ATR_PERIOD        = 14     # ATR calculation period (candles)
+VOLATILITY_GUARD_BASELINE_CANDLES  = 100    # how many candles' ATR to average for the baseline
+VOLATILITY_GUARD_RATIO_THRESHOLD   = 2.0    # current/baseline ATR ratio that triggers a block
+VOLATILITY_GUARD_TIMEFRAME         = "lower"  # which OHLC timeframe to use (matches TIMEFRAMES keys)
+
+# ============================================================
+# VOLUME-RANK LEVERAGE CAP — thin-liquidity slippage protection
+# ============================================================
+# Complementary to calculate_dynamic_leverage() (which reduces leverage
+# based on a coin's recent PRICE volatility). This caps leverage based
+# on a DIFFERENT, independent risk factor: the coin's RELATIVE 24h
+# trading-volume rank within the scanned Top-N universe (rank 1 =
+# highest volume that scan cycle). A coin can show calm recent price
+# action (the existing volatility check wouldn't reduce leverage) while
+# still sitting near the bottom of the Top-N list - meaning its order
+# book is comparatively thin, so a STOP_MARKET order can suffer real
+# slippage on a sudden move even though nothing in recent candles
+# hinted at it (exactly the scenario behind the user-reported TUTUSDT
+# -49% loss, where the exit price landed well past the configured stop
+# due to thin liquidity, not a bad stop-loss level or bad analysis).
+#
+# Uses RANK, not an absolute $ volume threshold, so this automatically
+# adapts to overall market conditions - "the bottom third of today's
+# Top-50" is always the relatively thinner group, whether that's a
+# quiet bear market or a frothy bull market.
+#
+# Never affects whether a trade opens (guards like Daily Loss Limit /
+# Smart Hours Guard / Volatility Guard already decide that) and never
+# touches the 5% margin-per-trade sizing - only caps the LEVERAGE
+# multiplier applied to that already-fixed margin, exactly like
+# calculate_dynamic_leverage() already does. Fails OPEN (no additional
+# cap) whenever a symbol's rank isn't available that cycle - never
+# blocks or restricts on uncertainty. Toggle ON/OFF live from Telegram
+# /menu, no restart needed.
+VOLUME_LEVERAGE_CAP_ENABLED      = True
+VOLUME_LEVERAGE_TIER1_MAX_RANK   = 15   # rank 1-15 (most liquid): no additional cap
+VOLUME_LEVERAGE_TIER2_MAX_RANK   = 30   # rank 16-30 (mid liquidity): capped below
+VOLUME_LEVERAGE_TIER2_MAX_LEVERAGE = 5  # leverage cap for rank 16-30
+VOLUME_LEVERAGE_TIER3_MAX_LEVERAGE = 3  # leverage cap for rank 31+ (thinnest tier scanned)
+
+# ============================================================
+# COIN PERFORMANCE AUTO-GUARD (user request) — auto-tracks each coin's
+# own win/loss record and can auto-disable a chronically losing coin
+# from the 30-sec scanning loop, same enforcement path as a coin you
+# manually switch OFF from Telegram's "🪙 Coin List View" (see
+# coin_performance_guard.py / bot_core._filter_disabled_coins).
+# ============================================================
+COIN_PERFORMANCE_GUARD_ENABLED = True  # master switch - Telegram-toggleable
+# ("Coin Performance Auto-Guard" in /menu), like every other guard. False =
+# feature fully off: no new auto-disables, AND any coin currently
+# auto-disabled immediately resumes scanning (manual disables from the
+# Coin List View are a separate, unaffected mechanism).
+
+COIN_PERF_LOOKBACK_DAYS = 30  # only trades CLOSED within this many days are
+# counted toward a coin's win rate - matches the user's "last 30 days /
+# last month" request.
+
+COIN_PERF_MIN_TRADES = 12  # a coin needs AT LEAST this many CLOSED trades
+# within COIN_PERF_LOOKBACK_DAYS before any auto-disable decision is made
+# at all (user request: 10-15, to stop 1-2 early losses from triggering
+# this on a tiny sample). Below this count, the coin is left alone
+# completely - same as if this whole guard didn't exist for it yet.
+
+# Two independent tiers, checked worst-first. Win rate uses the exact same
+# fee-adjusted pnl_percent > 0 definition telegram_control._build_rate_text()
+# already uses, so "win rate" here always means the same thing it does
+# everywhere else in the bot.
+COIN_PERF_PERMANENT_WINRATE_THRESHOLD = 25.0  # win rate AT OR BELOW this ->
+# PERMANENT auto-disable (stays off until a manual Telegram override -
+# see clear_manual_override in coin_performance_guard.py). Chosen well
+# below the ~36-39% real breakeven noted elsewhere in this file (TP1_
+# REANALYSIS / TRADING_HOURS_FILTER comments) - only a coin that's
+# clearly, badly broken gets this tier. Re-tune after real trading data.
+COIN_PERF_COOLDOWN_WINRATE_THRESHOLD = 40.0  # win rate above the permanent
+# threshold but AT OR BELOW this -> TEMPORARY COOLDOWN auto-disable for
+# COIN_PERF_COOLDOWN_DAYS, then automatic re-enable - no manual action
+# needed. Above this = performance is fine, no action.
+COIN_PERF_COOLDOWN_DAYS = 30  # cooldown length (user request: 30 days).
+
+COIN_PERFORMANCE_STATE_FILE = os.path.join(_BOT_INSTALL_DIR, "coin_performance_state.json")
+# Own persistence file (separate from SETTINGS_OVERRIDE_FILE) so this
+# guard's background auto-decisions and a Telegram admin's manual coin
+# toggle can never race each other writing to the same file - see
+# coin_performance_guard.py. Same _BOT_INSTALL_DIR-anchored pattern as
+# every other state file above, so it survives a PM2/VPS restart
+# regardless of the process's working directory.
+
+SMT_CORRELATED_MAP = {}         # optional per-symbol override, e.g. {"SOLUSDT": "ETHUSDT"} - falls back to BTCUSDT (or ETHUSDT when scanning BTCUSDT itself) when a symbol isn't listed
+DAILY_HISTORY_CANDLES = 200     # ~6.5 months of daily candles fetched per symbol for Macro Structure (PDH/PDL/PWH/PWL) and Old Highs/Lows
+OLD_HIGH_LOW_MIN_DAYS = 30      # an "old" swing high/low must be at least this many days back
+OLD_HIGH_LOW_MAX_DAYS = 180     # ...and at most this many days back (~6 months)
+
+# ============================================================
+# NEWS API CONFIGURATION
+# ============================================================
+NEWS_API_KEY = os.getenv("NEWS_API_KEY", "YOUR_NEWS_API_KEY_HERE")
+NEWS_ENABLED = True
+
+# ============================================================
+# DISCORD / TELEGRAM NOTIFICATIONS
+# ============================================================
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "YOUR_DISCORD_WEBHOOK_URL_HERE")
+DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "YOUR_DISCORD_BOT_TOKEN_HERE")
+ENABLE_DISCORD = True
+
+# ============================================================
+# TRADE MANAGEMENT
+# ============================================================
+TAKE_PROFIT_PERCENT = 5.0      # 5% take profit (also the clamp-range base for analysis-based TP)
+STOP_LOSS_PERCENT = 3.0        # 3% stop loss (also the clamp-range base for analysis-based SL)
+TRAILING_STOP_ACTIVATE = 0.5   # Activate trailing at 0.5% profit
+TRAILING_STOP_DISTANCE = 0.3   # Fallback only: used if a trade's entry ATR wasn't captured
+ATR_TRAILING_MULTIPLIER = 2.0  # Trailing distance = entry ATR(14) x this - adapts to each coin's own volatility instead of one fixed % for all coins
+MAX_OPEN_TRADES = 5           # Maximum concurrent trades
+
+# FIX (TP1 -> TP2 continuation): the moment a trade's first take-profit
+# (TP1) is hit, instead of closing immediately, the bot re-analyzes that
+# symbol right then with the exact same tools/timeframes used for entries.
+# If the fresh analysis still confirms continuation in the trade's
+# direction (same rule used for entries/reversals: MIN_TOOLS_MATCH tools
+# agreeing), the stop loss is moved up to the TP1 price (locking in that
+# profit) and a further TP2 target is set instead of closing. If the
+# fresh analysis does NOT confirm continuation, or fresh market data can't
+# be fetched at that moment, the trade closes at TP1 exactly as before —
+# nothing changes for that case. This applies automatically to every open
+# trade the bot manages; set to False to fully restore the old behavior
+# (close immediately on any TP hit).
+TP1_REANALYSIS_ENABLED = True
+
+# ADDED (user request): Telegram-toggleable Isolated/Cross margin mode.
+# True = ISOLATED, False = CROSSED. Read fresh from this same config dict
+# right before every trade opens (bot_core._execute_trade), so flipping
+# the "Isolated Margin" button in Telegram takes effect on the very next
+# trade - no restart needed. Default False (Cross) matches whatever the
+# account's existing/previous margin mode already was, so a bot that
+# never touches this toggle behaves exactly as before.
+USE_ISOLATED_MARGIN = False
+
+# These three previously had NO entry in config.py at all - they only
+# worked because the code's internal .get(key, default) fallback happened
+# to match a sane value. Making them explicit here means they're visible
+# and tunable like every other setting, not silently dependent on a
+# default buried in bot_core.py/trade_manager.py/analysis_engine.py.
+CALIBRATION_TABLE_FILE = os.path.join(_BOT_INSTALL_DIR, "calibration_table.json")
+CALIBRATION_MIN_SAMPLES = 20  # a score bucket needs at least this many backtested samples to be trusted
+REVERSAL_COOLDOWN_SECONDS = 240  # grace period after entry before reversal-based early-close can trigger
+
+# FIX (Real win-rate): Binance USDT-M futures taker fee, charged on BOTH
+# the entry fill and the exit fill. Used to subtract real trading cost
+# from a closed trade's PnL so the win-rate stat reflects actual net
+# results instead of just the raw ideal entry/exit price move.
+TRADING_FEE_PERCENT = 0.05     # % per side (Binance default taker fee)
+
+# ============================================================
+# STATE PERSISTENCE (FIX: survive bot/VPS restarts without losing
+# track of open positions and their SL/TP levels)
+# ============================================================
+TRADE_STATE_FILE = os.getenv("TRADE_STATE_FILE", os.path.join(_BOT_INSTALL_DIR, "trade_state.json"))
+
+# ============================================================
+# LOGGING
+# ============================================================
+LOG_LEVEL = "INFO"
+LOG_FILE = os.path.join(_BOT_INSTALL_DIR, "hackerai_bot.log")
+
+# ============================================================
+# ML FILTER (optional add-on - see ml_filter.py / ml_train.py)
+# ============================================================
+# Master switch for the whole module. False = bot behaves exactly as before
+# (nothing loaded, no messages). With True but no trained model yet, the
+# module is also a harmless no-op.
+ML_MODULE_ENABLED = True
+
+# The Telegram "ML Filter" button flips this one:
+#   False (default) = NOTIFY ONLY: trades open exactly as always; right after
+#                     each opens, Telegram says whether ML rates it GOOD or NOT GOOD.
+#   True            = BLOCK: a trade ML rates NOT GOOD is not opened.
+ML_FILTER_ENABLED = False
+
+ML_NOTIFY_ENABLED = True              # send the per-trade verdict message
+ML_BLOCK_NOTIFY_COOLDOWN_MIN = 60     # max 1 "blocked" message per coin+side per this many minutes
+ML_THRESHOLD_OVERRIDE = None          # e.g. 0.50 to override the threshold chosen at training time
+ML_BLOCK_EVEN_IF_UNVALIDATED = False  # keep False: a model that failed validation only advises
+ML_MODEL_FILE = os.path.join(_BOT_INSTALL_DIR, "ml_model.pkl")
+ML_DECISION_LOG_FILE = os.path.join(_BOT_INSTALL_DIR, "ml_decisions.jsonl")
+ML_LOG_MAX_BYTES = 5_000_000
+
+# ============================================================
+# ADAPTIVE EXIT (see exit_logic.py)
+# ============================================================
+# The entry signal needs 4h+1h+15m to agree, but the old trailing stop sat only
+# 2 x ATR(15m) behind price, so normal 15m wobble closed winners at tiny profits.
+#   ADAPTIVE_EXIT_ENABLED = True  -> trailing distance = max(old, TRAIL_MEDIUM_ATR_MULT x ATR(1h))
+#                                    + breakeven lock once trailing is active.
+#   ADAPTIVE_EXIT_ENABLED = False -> exactly the previous behaviour.
+# (Telegram button "Adaptive Exit" flips it instantly. Entry, initial SL and TP are unaffected.)
+ADAPTIVE_EXIT_ENABLED = True
+TRAIL_MEDIUM_ATR_MULT = 1.5        # x ATR(1h); the distance is never smaller than the old 2 x ATR(15m)
+TRAIL_BREAKEVEN_LOCK = True        # after trailing activates, the stop can never sit below entry
+BREAKEVEN_LOCK_BUFFER_PCT = 0.15   # price %, covers the 0.10% round-trip fee with a little left over
+
+# ============================================================
+# TOOL 1 SUB-CONCEPT DE-DUPLICATION (see analysis_engine._tool1_subconcepts)
+# ============================================================
+# BOS / CHoCH / MSS are all "price closed beyond the last swing high/low", and MSS is
+# literally CHoCH + a displacement candle; Displacement+PD and Volume Displacement need
+# one and the same displacement candle. Counting them separately let ONE event satisfy
+# Tool 1's "at least MIN_SUBCONCEPTS_PER_TOOL sub-concepts agree" rule.
+# True  = BOS/CHoCH/MSS count once, Displacement+PD/Volume Displacement count once.
+# False = the old counting. (Affects which setups qualify - fewer, but each one is
+#         backed by genuinely separate evidence. compare_tool1.py measures the effect.)
+TOOL1_DEDUPE_SUBCONCEPTS = True
+
+# ============================================================
+# REWARD / RISK GUARD (see exit_logic.reward_risk)
+# ============================================================
+# The analysis-based stop can sit very far from entry (the strongest level "however far")
+# while the first take-profit sits close, and position size is scaled down so a stop-out
+# costs a fixed ~2% of the account - so a $5 win can risk a $100 loss. Such a trade needs
+# an unrealistic win rate to break even (break-even win rate = 1 / (1 + R:R)):
+#   R:R 2.0 -> 33%  |  1.0 -> 50%  |  0.5 -> 67%  |  0.4 -> 71%  |  0.05 -> 95%
+# The guard skips a setup BEFORE any order when TP-distance / SL-distance < MIN_REWARD_RISK.
+# It does not move any stop or target; trades that pass are exactly as before.
+RR_GUARD_ENABLED = True
+MIN_REWARD_RISK = 0.4              # 0.4 = a trade must be able to break even at ~71% wins (your live win rate is ~70%)
+RR_GUARD_NOTIFY = True             # Telegram message when a setup is skipped (max 1 per coin+side per hour)
+RR_GUARD_LOG_COOLDOWN_MIN = 60
